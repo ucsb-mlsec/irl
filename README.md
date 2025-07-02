@@ -1,3 +1,3 @@
 # IRL
 
-The code is in `/home/kaijie/irl/recipe/irl`.
+The code is in `irl/recipe/irl`.
