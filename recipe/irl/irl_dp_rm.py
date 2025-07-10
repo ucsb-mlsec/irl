@@ -180,7 +180,10 @@ class DataParallelIRLRewardModel:
 
         return rm_scores
 
+
     def update_rm(self, data: DataProto):
+
+        # TODO: update reward model only based on the output reward values?
         # make sure we are in training mode
         self.reward_module.train()
         # select_keys = ['input_ids', 'responses', 'attention_mask', 'position_ids', 'is_expert', 'old_log_probs']
@@ -274,7 +277,7 @@ class DataParallelIRLRewardModel:
                     # )
 
                     if policy_mask.sum() > 0:
-                        loss = normalized_trajectory_rewards / policy_num
+                        loss = normalized_trajectory_rewards / policy_num # TODO: loss =? reward
                     
                     if expert_mask.sum() > 0:
                         loss = -normalized_trajectory_rewards / expert_num

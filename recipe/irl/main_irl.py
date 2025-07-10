@@ -34,7 +34,7 @@ import os
 import ray
 import hydra
 
-
+# TODO: What is the parallel method we should use
 @hydra.main(config_path='config', config_name='irl_trainer', version_base=None)
 def main(config):
     run_irl(config)

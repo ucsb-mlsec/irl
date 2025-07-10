@@ -488,7 +488,9 @@ class RayIRLTrainer(RayPPOTrainer):
         # We start from step 1
         self.global_steps += 1
         best_val_acc = 0.0
-        
+
+        # TODO: update the training logic? can update reward function for a while and then update policy? they can use different batches
+
         for epoch in range(self.config.trainer.total_epochs):
             print(f"Epoch {epoch+1}/{self.config.trainer.total_epochs}")
             
@@ -516,10 +518,10 @@ class RayIRLTrainer(RayPPOTrainer):
                     policy_log_prob = self.actor_rollout_wg.compute_log_prob(policy_batch)
                     policy_batch = policy_batch.union(policy_log_prob)
 
-                    scores = self.reward_fn.verify(policy_batch)
+                    scores = self.reward_fn.verify(policy_batch) # policy_batch needs to have the ground truth
                     expert_flags = torch.tensor(scores) > 0.99
                     policy_batch.batch['labels'] = torch.tensor(scores)
-                    policy_batch.batch['is_expert'] = expert_flags
+                    policy_batch.batch['is_expert'] = expert_flags # use the data that is correct as the expert traj
 
                     # batch_size = policy_batch.batch['responses'].shape[0]
                     # scores = torch.tensor([0] * batch_size)
@@ -528,7 +530,7 @@ class RayIRLTrainer(RayPPOTrainer):
                     # policy_batch.batch['is_expert'] = expert_flags
                     
                 # filter the training samples for both policy and expert
-                filter_reorder_index = self.filter_and_downsample(scores, policy_batch)
+                filter_reorder_index = self.filter_and_downsample(scores, policy_batch) #TODO: why doing this?
                 policy_batch.reorder(filter_reorder_index[:int(len(policy_batch) // 2)])
                 
                 # load expert samples
@@ -576,14 +578,14 @@ class RayIRLTrainer(RayPPOTrainer):
                 print("batch shape: ", batch.batch["responses"].shape)
                 
                 with _timer('train_reward_model', timing_raw):
-                    self.rm_wg.update_rm(batch)
+                    self.rm_wg.update_rm(batch) # TODO: the loss is weird in the current reward model implementation
                 
                 policy_batch.meta_info['global_token_num'] = torch.sum(policy_batch.batch['attention_mask'], dim=-1).tolist()
 
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
                 
-
+                #
                 # This was your interleaved index (e.g., [0, 4, 1, 5, 2, 6, 3, 7] for n_samples=4)
                 reorder_index = torch.zeros(2*n_samples, dtype=torch.long)
                 reorder_index[0::2] = torch.arange(n_samples)  # Policy indices in even positions

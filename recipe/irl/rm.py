@@ -20,7 +20,8 @@ class RewardModule(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=trust_remote_code)
         self.input_size = self.config.hidden_size
         self.ffn_hidden_size = ffn_hidden_size
-        
+
+        # TODO: architecture of the reward model can be changed more automatically
         self.ffn = nn.Sequential(
             nn.Linear(self.input_size, self.ffn_hidden_size),
             nn.ReLU(),
