@@ -170,6 +170,7 @@ class DataParallelIRLRewardModel:
                 rm_score, _ = self._forward_micro_batch(micro_batch, response_length)
             rm_scores_lst.append(rm_score)
         
+        # TODO: we could add normalization here for the reward, more stable for training
         rm_scores = torch.concat(rm_scores_lst, dim=0)
 
         if self.config.use_dynamic_bsz:
@@ -217,6 +218,7 @@ class DataParallelIRLRewardModel:
                 is_expert = mini_batch['is_expert']
                 
                 cur_idx = 0
+                # TODO: the loss is weired here
                 for micro_batch in micro_batches:
                     cur_idx += len(micro_batch)
 
@@ -337,6 +339,8 @@ class DataParallelIRLRewardModel:
                         # relative to the dynamic bsz
                         loss = loss * (len(micro_batch) / self.config.ppo_mini_batch_size)
                     else:
+                        # TODO: There is no need to divide by self.gradient_accumulation if, in each macro batch, the summed rewards for the negative and positive samples have already been divided by the number of negatives and positives, respectively.
+                        # no need to ensure the question is same for negative and postive samples. (i.e., we could think q as a initial state s_0)
                         loss = loss / self.gradient_accumulation
                     
                     loss.backward()

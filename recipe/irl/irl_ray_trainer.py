@@ -520,6 +520,7 @@ class RayIRLTrainer(RayPPOTrainer):
 
                     scores = self.reward_fn.verify(policy_batch) # policy_batch needs to have the ground truth
                     expert_flags = torch.tensor(scores) > 0.99
+                    # TODO: for the policy generated responses, we should always treat it as non-expert (i.e., negative samples)
                     policy_batch.batch['labels'] = torch.tensor(scores)
                     policy_batch.batch['is_expert'] = expert_flags # use the data that is correct as the expert traj
 
