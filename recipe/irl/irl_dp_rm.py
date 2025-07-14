@@ -253,9 +253,10 @@ class DataParallelIRLRewardModel:
                             epsilon = 1e-10
                             traj_importance = torch.exp((policy_rewards - (policy_log_probs + epsilon)))
                             traj_importance_prob = traj_importance / torch.sum(traj_importance)
-                        loss = 1.0 / torch.sum(traj_importance_prob * normalized_trajectory_rewards[policy_mask])
+                        loss = torch.sum(traj_importance_prob * normalized_trajectory_rewards[policy_mask])
                     else:
                         loss = 0.0
+                    
                     if expert_num > 0:
                         loss -= 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask])
 
