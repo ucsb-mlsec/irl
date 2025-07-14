@@ -233,12 +233,8 @@ class DataParallelIRLRewardModel:
                     # Sum along sequence dimension to get total reward per sample
                     trajectory_rewards = rm_score.sum(dim=-1)
                     normalized_trajectory_rewards = trajectory_rewards / max_positions.float()
-
-                    # Loss = expert loss - policy loss
-                    if expert_num > 0:
-                        loss = 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask]) 
-                    else:
-                        loss = 0.0
+                    
+                    # Loss = policy sum - expert sum
                     if policy_num > 0:
                         with torch.no_grad():
                             policy_log_probs = micro_batch["old_log_probs"][policy_mask]
@@ -257,7 +253,11 @@ class DataParallelIRLRewardModel:
                             epsilon = 1e-10
                             traj_importance = torch.exp((policy_rewards - (policy_log_probs + epsilon)))
                             traj_importance_prob = traj_importance / torch.sum(traj_importance)
-                        loss -= 1.0 / torch.sum(traj_importance_prob * normalized_trajectory_rewards[policy_mask])
+                        loss = 1.0 / torch.sum(traj_importance_prob * normalized_trajectory_rewards[policy_mask])
+                    else:
+                        loss = 0.0
+                    if expert_num > 0:
+                        loss -= 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask])
 
                     print(f"Epoch {epoch}, batch {batch_idx}, labels: {labels}, trajectory_rewards: {trajectory_rewards}, normalized_trajectory_rewards: {normalized_trajectory_rewards}, loss: {loss.item()}")
 
