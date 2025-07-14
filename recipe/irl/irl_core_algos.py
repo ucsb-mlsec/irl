@@ -44,7 +44,7 @@ def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Ten
         for i in range(0, returns.shape[0], n_samples):
             # --- Get the chunk for this calculation ---
             chunk_returns = returns[i:i + n_samples]
-            chunk_mask = mask_tensor[i:i + n_samples]
+            chunk_mask = mask_tensor[i:i + n_samples].float()
 
             # --- Calculate a per-timestep baseline ---
             # Sum of returns from all samples in the chunk (for active tokens)
@@ -54,9 +54,6 @@ def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Ten
 
             # Sum of returns from OTHER samples
             sum_of_other_returns = sum_of_chunk_returns - (chunk_returns * chunk_mask)
-
-            # Number of OTHER active samples.
-            # This is the key correction.
             num_other_active = num_active_samples - chunk_mask
             
             # Clamp denominator to 1 to avoid division by zero
