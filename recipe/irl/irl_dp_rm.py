@@ -212,8 +212,6 @@ class DataParallelIRLRewardModel:
                 self.reward_module.zero_grad()
 
                 is_expert = mini_batch['is_expert']
-                expert_num = torch.sum(is_expert).item()
-                policy_num = torch.sum(torch.logical_not(is_expert)).item()
                 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.cuda()
