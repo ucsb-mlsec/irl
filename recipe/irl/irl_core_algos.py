@@ -100,8 +100,7 @@ def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Ten
 
             reward_tensors.append(masked_rloo(reward_tensor, reward_mask) * config.algorithm.reward_gt_coef)
 
-        returns = sum(reward_tensors)
-        advantages = returns.clone()
+        advantages = sum(reward_tensors)
         advantages = verl_F.masked_whiten(advantages, response_mask)
 
         return advantages
