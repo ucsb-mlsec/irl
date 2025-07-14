@@ -48,9 +48,8 @@ def compute_advantage(data: DataProto, adv_estimator, config):
         response_length = responses.size(-1)
         attention_mask = data.batch['attention_mask']
         response_mask = attention_mask[:, -response_length:]
-        advantages, returns = irl_core_algos.compute_rloo_advantage_return(data, response_mask, config.actor_rollout_ref.rollout.n, config)
+        advantages = irl_core_algos.compute_rloo_advantage_return(data, response_mask, config.actor_rollout_ref.rollout.n, config)
         data.batch['advantages'] = advantages
-        data.batch['returns'] = returns
     else:
         raise NotImplementedError
     return data
@@ -59,8 +58,6 @@ def compute_advantage(data: DataProto, adv_estimator, config):
 def compute_data_metrics(batch):
 
     advantages = batch.batch['advantages']
-    returns = batch.batch['returns']
-
     max_response_length = batch.batch['responses'].shape[-1]
 
     prompt_mask = batch.batch['attention_mask'][:, :-max_response_length].bool()
@@ -73,7 +70,6 @@ def compute_data_metrics(batch):
     response_length = response_info['response_length']
 
     valid_adv = torch.masked_select(advantages, response_mask)
-    valid_returns = torch.masked_select(returns, response_mask)
 
     metrics = {
         # adv
@@ -83,14 +79,6 @@ def compute_data_metrics(batch):
             torch.max(valid_adv).detach().item(),
         'critic/advantages/min':
             torch.min(valid_adv).detach().item(),
-        # returns
-        'critic/returns/mean':
-            torch.mean(valid_returns).detach().item(),
-        'critic/returns/max':
-            torch.max(valid_returns).detach().item(),
-        'critic/returns/min':
-            torch.min(valid_returns).detach().item(),
-
         # response length
         'response_length/mean':
             torch.mean(response_length).detach().item(),
@@ -488,9 +476,7 @@ class RayIRLTrainer(RayPPOTrainer):
         # We start from step 1
         self.global_steps += 1
         best_val_acc = 0.0
-
-        # TODO: update the training logic? can update reward function for a while and then update policy? they can use different batches
-
+        
         for epoch in range(self.config.trainer.total_epochs):
             print(f"Epoch {epoch+1}/{self.config.trainer.total_epochs}")
             
@@ -518,11 +504,10 @@ class RayIRLTrainer(RayPPOTrainer):
                     policy_log_prob = self.actor_rollout_wg.compute_log_prob(policy_batch)
                     policy_batch = policy_batch.union(policy_log_prob)
 
-                    scores = self.reward_fn.verify(policy_batch) # policy_batch needs to have the ground truth
+                    scores = self.reward_fn.verify(policy_batch)
                     expert_flags = torch.tensor(scores) > 0.99
-                    # TODO: for the policy generated responses, we should always treat it as non-expert (i.e., negative samples)
                     policy_batch.batch['labels'] = torch.tensor(scores)
-                    policy_batch.batch['is_expert'] = expert_flags # use the data that is correct as the expert traj
+                    policy_batch.batch['is_expert'] = expert_flags
 
                     # batch_size = policy_batch.batch['responses'].shape[0]
                     # scores = torch.tensor([0] * batch_size)
@@ -531,7 +516,7 @@ class RayIRLTrainer(RayPPOTrainer):
                     # policy_batch.batch['is_expert'] = expert_flags
                     
                 # filter the training samples for both policy and expert
-                filter_reorder_index = self.filter_and_downsample(scores, policy_batch) #TODO: why doing this?
+                filter_reorder_index = self.filter_and_downsample(scores, policy_batch)
                 policy_batch.reorder(filter_reorder_index[:int(len(policy_batch) // 2)])
                 
                 # load expert samples
@@ -579,14 +564,14 @@ class RayIRLTrainer(RayPPOTrainer):
                 print("batch shape: ", batch.batch["responses"].shape)
                 
                 with _timer('train_reward_model', timing_raw):
-                    self.rm_wg.update_rm(batch) # TODO: the loss is weird in the current reward model implementation
+                    self.rm_wg.update_rm(batch)
                 
                 policy_batch.meta_info['global_token_num'] = torch.sum(policy_batch.batch['attention_mask'], dim=-1).tolist()
 
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
                 
-                #
+
                 # This was your interleaved index (e.g., [0, 4, 1, 5, 2, 6, 3, 7] for n_samples=4)
                 reorder_index = torch.zeros(2*n_samples, dtype=torch.long)
                 reorder_index[0::2] = torch.arange(n_samples)  # Policy indices in even positions
@@ -618,8 +603,7 @@ class RayIRLTrainer(RayPPOTrainer):
                 policy_rollout_rm_scores = DataProto.from_dict(tensors={'rm_scores': policy_rollout_rm_scores})
                 policy_batch = policy_batch.union(policy_rollout_rm_scores)
                 # rm_scores = DataProto.from_dict(tensors={'rm_scores': rm_scores})
-                # batch = batch.union(rm_scores)
-                
+                # batch = batch.union(rm_scores)                
                 with _timer('update_policy_model', timing_raw):
                     # Skip generation since we already have the samples
                     # We already have the complete policy batch with generated responses
@@ -730,10 +714,10 @@ class RayIRLTrainer(RayPPOTrainer):
                         best_val_acc = cur_val_acc
                         print(f"Best validation accuracy so far: {best_val_acc}")
                         # Save the best model
-                        self._save_checkpoint()
+                        # self._save_checkpoint()
 
-                if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                    self._save_checkpoint()
+                # if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
+                #     self._save_checkpoint()
                 
                 if self.global_steps >= self.total_training_steps:
                     return

@@ -17,54 +17,67 @@ import verl
 import verl.utils.torch_functional as verl_F
 
 
-# TODO: implement more ways of doing advantage
-"""
-PPO (GAE):
-    - Compute one-step TD residuals: \delta_t = r_t + \gamma * V(s_{t+1}) - V(s_t)
-    - Compute advantage: A_t = \sum_l=0^{\T-t-1} (\gamma\lambda)^l \delta_{t+l}
-REINFORCE:
-    - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
-    - advantage A_t = G_t - b_t, b_t = 0
-RLOO:
-    - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
-    - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}], b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}
-GRPO:
-    - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
-    - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}]/\sigma, b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}, \sigma = std(G_t)
-"""
-
-
 def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, n_samples, config):
     # calculate rloo reward on different reward sources, and sum again
-
     def masked_rloo(reward_tensor_original, mask_tensor):
+        """
+        Calculates the leave-one-out return for a batch of sequences,
+        correctly handling variable-length padding for the mean baseline.
+
+        Args:
+            reward_tensor_original (torch.Tensor): The original reward tensor.
+            mask_tensor (torch.Tensor): The mask tensor indicating valid steps.
+            n_samples (int): The number of samples in each batch.
+
+        Returns:
+            torch.Tensor: The leave-one-out adjusted returns, correctly masked.
+        """
         reward_tensor = reward_tensor_original.clone()
         reward_tensor[~mask_tensor] = 0
-        for start_pos in range(0, reward_tensor.shape[0], n_samples):
-            cur_rewards_mean = torch.cat([
-                reward_tensor[pos:pos + 1][mask_tensor[pos:pos + 1]].mean(dim=0, keepdim=True)
-                for pos in range(start_pos, start_pos + n_samples)
-            ], dim=0) # TODO: what is this?
-            cur_rewards_sum = cur_rewards_mean.sum()
-            cur_reward_baseline = cur_rewards_sum / (n_samples - 1) # TODO: no leave one out when computing the mean
-            reward_tensor[start_pos:start_pos + n_samples][
-                mask_tensor[start_pos:start_pos + n_samples]] = \
-                reward_tensor[start_pos:start_pos + n_samples][
-                    mask_tensor[start_pos:start_pos + n_samples]] * (
-                        n_samples / (n_samples - 1)) - cur_reward_baseline # TODO: why do this? (n_samples / (n_samples - 1))
+        returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+        all_adjusted_returns = []
 
-        return reward_tensor
+        for i in range(0, returns.shape[0], n_samples):
+            # --- Get the chunk for this calculation ---
+            chunk_returns = returns[i:i + n_samples]
+            chunk_mask = mask_tensor[i:i + n_samples]
+
+            # --- Calculate a per-timestep baseline ---
+            # Sum of returns from all samples in the chunk (for active tokens)
+            sum_of_chunk_returns = (chunk_returns * chunk_mask).sum(dim=0)
+            # Number of active samples at each timestep in the chunk
+            num_active_samples = chunk_mask.sum(dim=0)
+
+            # Sum of returns from OTHER samples
+            sum_of_other_returns = sum_of_chunk_returns - (chunk_returns * chunk_mask)
+
+            # Number of OTHER active samples.
+            # This is the key correction.
+            num_other_active = num_active_samples - chunk_mask
+            
+            # Clamp denominator to 1 to avoid division by zero
+            # (if a token is active where all others are padded)
+            denominator = num_other_active.clamp(min=1)
+
+            baseline = sum_of_other_returns / denominator
+            
+            adjusted_returns = chunk_returns - baseline
+            all_adjusted_returns.append(adjusted_returns)
+
+        final_returns = torch.cat(all_adjusted_returns, dim=0)
+        final_returns = final_returns * mask_tensor
+
+        return final_returns
 
     reward_tensors = []
 
     with torch.no_grad():
 
-        # TODO: What are these two options?
         if 'rm_scores' in data.batch.keys() and config.algorithm.reward_dpo_coef != 0.:
             reward_tensor = data.batch['rm_scores']
             reward_mask = response_mask.bool()
 
-            reward_tensors.append(masked_rloo(reward_tensor, reward_mask) * config.algorithm.reward_dpo_coef) # TODO: what is this config.algorithm.reward_dpo_coef
+            reward_tensors.append(masked_rloo(reward_tensor, reward_mask) * config.algorithm.reward_dpo_coef)
 
         if 'acc' in data.batch.keys() and config.algorithm.reward_gt_coef != 0.:
             reward_tensor = torch.zeros_like(response_mask, dtype=torch.float32)
@@ -83,18 +96,12 @@ def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Ten
 
             reward_tensors.append(masked_rloo(reward_tensor, reward_mask) * config.algorithm.reward_gt_coef)
 
-        final_reward_tensor = sum(reward_tensors)
-
-        returns = (final_reward_tensor * response_mask).flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
-
-        advantages = returns.clone() # TODO: why return is the same as advantage?
+        returns = sum(reward_tensors)
+        advantages = returns.clone()
         advantages = verl_F.masked_whiten(advantages, response_mask)
 
-        return advantages, returns
+        return advantages
 
-"""
-    IRL loss for reward function: XXXXX
-"""
 
 def compute_ce_dpo_loss_rm(token_level_scores, acc, response_mask, beta):
     cur_scores = ((token_level_scores * response_mask).sum(dim=1) * beta).sigmoid()

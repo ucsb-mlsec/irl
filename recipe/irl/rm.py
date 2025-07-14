@@ -28,6 +28,7 @@ class RewardModule(nn.Module):
             nn.Linear(self.ffn_hidden_size, self.ffn_hidden_size),
             nn.ReLU(),
             nn.Linear(self.ffn_hidden_size, 1),
+            nn.Tanh()
             # nn.Sigmoid()
         )
 

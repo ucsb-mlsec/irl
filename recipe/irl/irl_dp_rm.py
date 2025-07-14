@@ -170,7 +170,6 @@ class DataParallelIRLRewardModel:
                 rm_score, _ = self._forward_micro_batch(micro_batch, response_length)
             rm_scores_lst.append(rm_score)
         
-        # TODO: we could add normalization here for the reward, more stable for training
         rm_scores = torch.concat(rm_scores_lst, dim=0)
 
         if self.config.use_dynamic_bsz:
@@ -181,10 +180,7 @@ class DataParallelIRLRewardModel:
 
         return rm_scores
 
-
     def update_rm(self, data: DataProto):
-
-        # TODO: update reward model only based on the output reward values?
         # make sure we are in training mode
         self.reward_module.train()
         # select_keys = ['input_ids', 'responses', 'attention_mask', 'position_ids', 'is_expert', 'old_log_probs']
@@ -216,18 +212,10 @@ class DataParallelIRLRewardModel:
                 self.reward_module.zero_grad()
 
                 is_expert = mini_batch['is_expert']
+                expert_num = torch.sum(is_expert).item()
+                policy_num = torch.sum(torch.logical_not(is_expert)).item()
                 
-                cur_idx = 0
-                # TODO: the loss is weired here
                 for micro_batch in micro_batches:
-                    cur_idx += len(micro_batch)
-
-                    question_id = cur_idx // 8
-                    # hard code the batch size to 8
-                    cur_is_expert = is_expert[question_id:question_id+8]
-                    expert_num = torch.sum(cur_is_expert).item()
-                    policy_num = torch.sum(torch.logical_not(cur_is_expert)).item()
-
                     micro_batch = micro_batch.cuda()
 
                     response_ids = micro_batch['responses']
@@ -242,47 +230,36 @@ class DataParallelIRLRewardModel:
                     expert_mask = micro_batch['is_expert']
                     policy_mask = torch.logical_not(expert_mask)
 
+                    expert_num, policy_num = torch.sum(expert_mask), torch.sum(policy_mask)
                     # Calculate the total reward for each trajectory
                     # Sum along sequence dimension to get total reward per sample
-                    trajectory_rewards = rm_score.sum(dim=-1, keepdim=True)
-                    normalized_trajectory_rewards = trajectory_rewards / max_positions.unsqueeze(-1).float()
+                    trajectory_rewards = rm_score.sum(dim=-1)
+                    normalized_trajectory_rewards = trajectory_rewards / max_positions.float()
 
-                    # # Calculate importance scores for policy samples
-                    # if policy_mask.sum() > 0:
-                    #     policy_log_probs = micro_batch["old_log_probs"][policy_mask]
-
-                    #     # Create a mask to avoid in-place operations
-                    #     mask = torch.ones_like(policy_log_probs)
-                    #     for i in range(micro_batch['input_ids'].shape[0]):
-                    #         mask[i, max_positions[i]:] = 0
+                    # Loss = expert loss - policy loss
+                    if expert_num > 0:
+                        loss = 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask]) 
+                    else:
+                        loss = 0.0
+                    if policy_num > 0:
+                        with torch.no_grad():
+                            policy_log_probs = micro_batch["old_log_probs"][policy_mask]
+                            policy_max_positions = max_positions[policy_mask]
+                            # Create a mask to avoid in-place operations
+                            mask = torch.ones_like(policy_log_probs)
+                            for i in range(policy_log_probs.shape[0]):
+                                mask[i, policy_max_positions[i]:] = 0
+                            # Apply mask via multiplication rather than in-place assignment
+                            policy_log_probs = policy_log_probs[:, -response_length:] * mask
                             
-                    #     # Apply mask via multiplication rather than in-place assignment
-                    #     policy_log_probs = policy_log_probs[:, -response_length:] * mask
-                        
-                    #     policy_log_probs = torch.sum(policy_log_probs, dim=-1, keepdim=True) / max_positions[policy_mask].unsqueeze(-1).float()
+                            policy_log_probs = torch.sum(policy_log_probs, dim=-1) 
 
-                    #     policy_rewards = normalized_trajectory_rewards[policy_mask]
+                            policy_rewards = trajectory_rewards[policy_mask]
 
-                    #     epsilon = 1e-10
-                    #     # normalize the importance score here to avoid near zero importance score
-                    #     # actually the importance score decays with larger reasoning length
-                    #     # if normalized, the importance score will be nearly equal to 1
-                    #     traj_importance = torch.exp((policy_rewards - (policy_log_probs + epsilon)))
-                    # else:
-                    #     traj_importance = torch.ones_like(trajectory_rewards[policy_mask])
-
-                    # # Calculate the loss
-                    # loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                    #     normalized_trajectory_rewards.squeeze(-1),
-                    #     labels.float(),
-                    #     reduction='mean'
-                    # )
-
-                    if policy_mask.sum() > 0:
-                        loss = normalized_trajectory_rewards / policy_num # TODO: loss =? reward
-                    
-                    if expert_mask.sum() > 0:
-                        loss = -normalized_trajectory_rewards / expert_num
+                            epsilon = 1e-10
+                            traj_importance = torch.exp((policy_rewards - (policy_log_probs + epsilon)))
+                            traj_importance_prob = traj_importance / torch.sum(traj_importance)
+                        loss -= 1.0 / torch.sum(traj_importance_prob * normalized_trajectory_rewards[policy_mask])
 
                     print(f"Epoch {epoch}, batch {batch_idx}, labels: {labels}, trajectory_rewards: {trajectory_rewards}, normalized_trajectory_rewards: {normalized_trajectory_rewards}, loss: {loss.item()}")
 
@@ -301,48 +278,12 @@ class DataParallelIRLRewardModel:
                         print(f"Epoch {epoch}, batch {batch_idx}, policy text: {text[0][:100]}")
                     
                     print("*"*20)
-                                    
-                    # weighted_policy_rewards = policy_rewards * traj_importance
-                    # # weighted_policy_rewards = policy_rewards
-
-                    # # print("weighted_policy_rewards")
-                    # # print(weighted_policy_rewards)
-
-                    # # For experts: we want to maximize rewards, and the optimal reward is 1
-                    # expert_loss = 1 - torch.mean(expert_rewards) if expert_rewards.numel() > 0 else 0
-                    
-                    # beta = 1 / 3
-
-                    # policy_loss = torch.sum(weighted_policy_rewards) if weighted_policy_rewards.numel() > 0 else 0
-                    
-                    # # expert_loss = expert_loss / expert_num if expert_num > 0 else 0
-                    # # policy_loss = policy_loss / policy_num if policy_num > 0 else 0
-                    
-                    # loss = (expert_loss + beta * policy_loss) / bs
-                    # # loss = (expert_loss + policy_loss) / bs
-
-                    # print(f"Epoch {epoch}, batch {batch_idx}, loss: {loss.item()}")
-                    # if weighted_policy_rewards.numel() > 0:
-                    #     print(f"Epoch {epoch}, batch {batch_idx}, policy_loss: {policy_loss.item()}")
-                    # if expert_rewards.numel() > 0:
-                    #     print(f"Epoch {epoch}, batch {batch_idx}, expert_loss: {expert_loss.item()}")
-
-                    # # Record metrics
-                    # if expert_rewards.numel() > 0:
-                    #     expert_losses.append(expert_loss.detach().item())
-                    # if weighted_policy_rewards.numel() > 0:
-                    #     policy_losses.append(policy_loss.detach().item())
-                    # if traj_importance.numel() > 0:
-                    #     importance_scores.append(traj_importance.detach().mean().item())
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = loss * (len(micro_batch) / self.config.ppo_mini_batch_size)
                     else:
-                        # TODO: There is no need to divide by self.gradient_accumulation if, in each macro batch, the summed rewards for the negative and positive samples have already been divided by the number of negatives and positives, respectively.
-                        # no need to ensure the question is same for negative and postive samples. (i.e., we could think q as a initial state s_0)
-                        loss = loss / self.gradient_accumulation
-                    
+                        loss = loss /  self.gradient_accumulation
                     loss.backward()
 
                 self._optimizer_step()
