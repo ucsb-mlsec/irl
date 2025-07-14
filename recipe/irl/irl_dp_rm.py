@@ -20,6 +20,8 @@ from typing import Iterable
 import torch
 import torch.distributed
 from torch import nn, optim
+import torch.nn.functional as F
+
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
@@ -180,121 +182,108 @@ class DataParallelIRLRewardModel:
 
         return rm_scores
 
-    def update_rm(self, data: DataProto):
-        # make sure we are in training mode
-        self.reward_module.train()
-        # select_keys = ['input_ids', 'responses', 'attention_mask', 'position_ids', 'is_expert', 'old_log_probs']
-        select_keys = ['input_ids', 'responses', 'attention_mask', 'position_ids', 'is_expert', 'old_log_probs', 'labels']
+        def update_rm(self, data: DataProto):
+            # make sure we are in training mode
+            self.reward_module.train()
+            select_keys = ['input_ids', 'responses', 'attention_mask', 'position_ids', 'is_expert', 'old_log_probs', 'labels']
 
-        batch = data.select(batch_keys=select_keys).batch
-        dataloader = batch.split(self.config.mini_batch_size)
+            batch = data.select(batch_keys=select_keys).batch
+            dataloader = batch.split(self.config.mini_batch_size)
 
-        print(f"dataloader size: {len(dataloader)}")
+            print(f"dataloader size: {len(dataloader)}")
 
-        # expert_losses = []
-        # policy_losses = []
-        # importance_scores = []
-        # grad_norms = []
-
-        # first update the reward model
-        loss = 0
-        for epoch in range(self.config.rm_epochs):
-            for batch_idx, mini_batch in enumerate(dataloader):
-                # split batch into micro_batches
-                # TODO: dynamic bsz may not be compatible yet
-                if self.config.use_dynamic_bsz:
-                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
-                else:
-                    micro_batches = mini_batch.split(self.config.micro_batch_size_per_gpu)
-                    self.gradient_accumulation = self.config.mini_batch_size // self.config.micro_batch_size_per_gpu
-                
-                self.reward_module.zero_grad()
-
-                is_expert = mini_batch['is_expert']
-                
-                for micro_batch in micro_batches:
-                    micro_batch = micro_batch.cuda()
-
-                    response_ids = micro_batch['responses']
-                    response_length = response_ids.shape[-1]
-                    bs = response_ids.shape[0]
-
-                    # Forward pass to get rewards
-                    rm_score, max_positions = self._forward_micro_batch(micro_batch, response_length)
-                    print(f"Epoch {epoch}, batch {batch_idx}, bs: {bs}, response_length: {response_length}")
-
-                    labels = micro_batch['labels']
-                    expert_mask = micro_batch['is_expert']
-                    policy_mask = torch.logical_not(expert_mask)
-
-                    expert_num, policy_num = torch.sum(expert_mask), torch.sum(policy_mask)
-                    # Calculate the total reward for each trajectory
-                    # Sum along sequence dimension to get total reward per sample
-                    trajectory_rewards = rm_score.sum(dim=-1)
-                    normalized_trajectory_rewards = trajectory_rewards / max_positions.float()
-                    
-                    # Loss = policy sum - expert sum
-                    if policy_num > 0:
-                        with torch.no_grad():
-                            policy_log_probs = micro_batch["old_log_probs"][policy_mask]
-                            policy_max_positions = max_positions[policy_mask]
-                            # Create a mask to avoid in-place operations
-                            mask = torch.ones_like(policy_log_probs)
-                            for i in range(policy_log_probs.shape[0]):
-                                mask[i, policy_max_positions[i]:] = 0
-                            # Apply mask via multiplication rather than in-place assignment
-                            policy_log_probs = policy_log_probs[:, -response_length:] * mask
-                            
-                            policy_log_probs = torch.sum(policy_log_probs, dim=-1) 
-
-                            policy_rewards = trajectory_rewards[policy_mask]
-
-                            epsilon = 1e-10
-                            traj_importance = torch.exp((policy_rewards - (policy_log_probs + epsilon)))
-                            traj_importance_prob = traj_importance / torch.sum(traj_importance)
-                        loss = torch.sum(traj_importance_prob * normalized_trajectory_rewards[policy_mask])
-                    else:
-                        loss = 0.0
-                    
-                    if expert_num > 0:
-                        loss -= 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask])
-
-                    print(f"Epoch {epoch}, batch {batch_idx}, labels: {labels}, trajectory_rewards: {trajectory_rewards}, normalized_trajectory_rewards: {normalized_trajectory_rewards}, loss: {loss.item()}")
-
-                    # # Separate expert and policy rewards
-                    # expert_rewards = normalized_trajectory_rewards[expert_mask]
-                    # policy_rewards = normalized_trajectory_rewards[policy_mask]
-
-                    print("*"*20)
-                    if expert_mask.sum() > 0:               
-                        print(f"Epoch {epoch}, batch {batch_idx}, expert rewards: {normalized_trajectory_rewards}")
-                        text = self.reward_module.tokenizer.batch_decode(micro_batch["responses"][expert_mask], skip_special_tokens=True)
-                        print(f"Epoch {epoch}, batch {batch_idx}, expert text: {text[0][:100]}")
-                    else:
-                        print(f"Epoch {epoch}, batch {batch_idx}, policy rewards: {normalized_trajectory_rewards}")
-                        text = self.reward_module.tokenizer.batch_decode(micro_batch["responses"][policy_mask], skip_special_tokens=True)
-                        print(f"Epoch {epoch}, batch {batch_idx}, policy text: {text[0][:100]}")
-                    
-                    print("*"*20)
-
+            # first update the reward model
+            loss = 0
+            for epoch in range(self.config.rm_epochs):
+                for batch_idx, mini_batch in enumerate(dataloader):
+                    # split batch into micro_batches
+                    # TODO: dynamic bsz may not be compatible yet
                     if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = loss * (len(micro_batch) / self.config.ppo_mini_batch_size)
+                        max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                        micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
                     else:
-                        loss = loss /  self.gradient_accumulation
-                    loss.backward()
+                        micro_batches = mini_batch.split(self.config.micro_batch_size_per_gpu)
+                        self.gradient_accumulation = self.config.mini_batch_size // self.config.micro_batch_size_per_gpu
+                    
+                    self.reward_module.zero_grad()
 
-                self._optimizer_step()
-                # grad_norm = self._optimizer_step()
-                # grad_norms.append(grad_norm.detach().item())
+                    for micro_batch in micro_batches:
+                        micro_batch = micro_batch.cuda()
 
-        # # Add counts to metrics to help with proper synchronization
-        # metrics['rm/expert_loss'] = expert_losses
-        # metrics['rm/policy_loss'] = policy_losses
-        # metrics['rm/importance_score'] = importance_scores
-        # metrics['rm/grad_norm'] = grad_norms
-        
-        self.reward_optimizer.zero_grad()
+                        response_ids = micro_batch['responses']
+                        response_length = response_ids.shape[-1]
+                        bs = response_ids.shape[0]
 
-        return {}
+                        # Forward pass to get rewards
+                        rm_score, max_positions = self._forward_micro_batch(micro_batch, response_length)
+                        print(f"Epoch {epoch}, batch {batch_idx}, bs: {bs}, response_length: {response_length}")
+
+                        labels = micro_batch['labels']
+                        expert_mask = micro_batch['is_expert']
+                        policy_mask = torch.logical_not(expert_mask)
+
+                        expert_num, policy_num = torch.sum(expert_mask).item(), torch.sum(policy_mask).item()
+                        # Calculate the total reward for each trajectory
+                        # Sum along sequence dimension to get total reward per sample
+                        trajectory_rewards = rm_score.sum(dim=-1)
+                        normalized_trajectory_rewards = trajectory_rewards / max_positions.float()
+
+                        # Loss = policy sum - expert sum
+                        if policy_num > 0:
+                            with torch.no_grad():
+                                policy_log_probs = micro_batch["old_log_probs"][policy_mask]
+                                policy_max_positions = max_positions[policy_mask]
+                                # Create a mask to avoid in-place operations
+                                mask = torch.ones_like(policy_log_probs)
+                                for i in range(policy_log_probs.shape[0]):
+                                    mask[i, policy_max_positions[i]:] = 0
+                                # Apply mask via multiplication rather than in-place assignment
+                                policy_log_probs = policy_log_probs * mask                            
+                                policy_log_probs = torch.sum(policy_log_probs, dim=-1) 
+                                policy_rewards = trajectory_rewards[policy_mask]
+                                traj_importance = F.softmax(policy_rewards - policy_log_probs, dim=0)
+                            loss = torch.sum(traj_importance * normalized_trajectory_rewards[policy_mask])
+                        else:
+                            loss = 0.0
+                        if expert_num > 0:
+                            loss -= 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask])
+                        print(f"Epoch {epoch}, batch {batch_idx}, labels: {labels}, trajectory_rewards: {trajectory_rewards}, normalized_trajectory_rewards: {normalized_trajectory_rewards}, loss: {loss.item()}")
+
+                        # # Separate expert and policy rewards
+                        # expert_rewards = normalized_trajectory_rewards[expert_mask]
+                        # policy_rewards = normalized_trajectory_rewards[policy_mask]
+
+                        print("*"*20)
+                        if expert_mask.sum() > 0:               
+                            print(f"Epoch {epoch}, batch {batch_idx}, expert rewards: {normalized_trajectory_rewards}")
+                            text = self.reward_module.tokenizer.batch_decode(micro_batch["responses"][expert_mask], skip_special_tokens=True)
+                            print(f"Epoch {epoch}, batch {batch_idx}, expert text: {text[0][:100]}")
+                        else:
+                            print(f"Epoch {epoch}, batch {batch_idx}, policy rewards: {normalized_trajectory_rewards}")
+                            text = self.reward_module.tokenizer.batch_decode(micro_batch["responses"][policy_mask], skip_special_tokens=True)
+                            print(f"Epoch {epoch}, batch {batch_idx}, policy text: {text[0][:100]}")
+                        
+                        print("*"*20)
+
+                        if self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = loss * (len(micro_batch) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = loss /  self.gradient_accumulation
+                        loss.backward()
+
+                    self._optimizer_step()
+                    # grad_norm = self._optimizer_step()
+                    # grad_norms.append(grad_norm.detach().item())
+
+            # # Add counts to metrics to help with proper synchronization
+            # metrics['rm/expert_loss'] = expert_losses
+            # metrics['rm/policy_loss'] = policy_losses
+            # metrics['rm/importance_score'] = importance_scores
+            # metrics['rm/grad_norm'] = grad_norms
+            
+            self.reward_optimizer.zero_grad()
+
+            return {}
+
+    
