@@ -17,21 +17,25 @@ import verl
 import verl.utils.torch_functional as verl_F
 
 
+# TODO: implement more ways of doing advantage
+"""
+PPO (GAE):
+    - Compute one-step TD residuals: \delta_t = r_t + \gamma * V(s_{t+1}) - V(s_t)
+    - Compute advantage: A_t = \sum_l=0^{\T-t-1} (\gamma\lambda)^l \delta_{t+l}
+REINFORCE:
+    - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
+    - advantage A_t = G_t - b_t, b_t = 0
+RLOO:
+    - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
+    - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}], b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}
+GRPO:
+    - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
+    - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}]/\sigma, b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}, \sigma = std(G_t)
+"""
+
 def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, n_samples, config):
     # calculate rloo reward on different reward sources, and sum again
     def masked_rloo(reward_tensor_original, mask_tensor):
-        """
-        Calculates the leave-one-out return for a batch of sequences,
-        correctly handling variable-length padding for the mean baseline.
-
-        Args:
-            reward_tensor_original (torch.Tensor): The original reward tensor.
-            mask_tensor (torch.Tensor): The mask tensor indicating valid steps.
-            n_samples (int): The number of samples in each batch.
-
-        Returns:
-            torch.Tensor: The leave-one-out adjusted returns, correctly masked.
-        """
         reward_tensor = reward_tensor_original.clone()
         reward_tensor[~mask_tensor] = 0
         returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])

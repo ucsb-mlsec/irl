@@ -714,10 +714,10 @@ class RayIRLTrainer(RayPPOTrainer):
                         best_val_acc = cur_val_acc
                         print(f"Best validation accuracy so far: {best_val_acc}")
                         # Save the best model
-                        # self._save_checkpoint()
+                        self._save_checkpoint()
 
-                # if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                #     self._save_checkpoint()
+                if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
+                    self._save_checkpoint()
                 
                 if self.global_steps >= self.total_training_steps:
                     return
