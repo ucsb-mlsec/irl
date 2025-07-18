@@ -190,6 +190,7 @@ class DataParallelIRLRewardModel:
             batch = data.select(batch_keys=select_keys).batch
             dataloader = batch.split(self.config.mini_batch_size)
 
+            metrics = {}
             print(f"dataloader size: {len(dataloader)}")
 
             # first update the reward model
@@ -249,10 +250,6 @@ class DataParallelIRLRewardModel:
                             loss -= 1.0 / expert_num * torch.sum(normalized_trajectory_rewards[expert_mask])
                         print(f"Epoch {epoch}, batch {batch_idx}, labels: {labels}, trajectory_rewards: {trajectory_rewards}, normalized_trajectory_rewards: {normalized_trajectory_rewards}, loss: {loss.item()}")
 
-                        # # Separate expert and policy rewards
-                        # expert_rewards = normalized_trajectory_rewards[expert_mask]
-                        # policy_rewards = normalized_trajectory_rewards[policy_mask]
-
                         print("*"*20)
                         if expert_mask.sum() > 0:               
                             print(f"Epoch {epoch}, batch {batch_idx}, expert rewards: {normalized_trajectory_rewards}")
@@ -273,17 +270,6 @@ class DataParallelIRLRewardModel:
                         loss.backward()
 
                     self._optimizer_step()
-                    # grad_norm = self._optimizer_step()
-                    # grad_norms.append(grad_norm.detach().item())
 
-            # # Add counts to metrics to help with proper synchronization
-            # metrics['rm/expert_loss'] = expert_losses
-            # metrics['rm/policy_loss'] = policy_losses
-            # metrics['rm/importance_score'] = importance_scores
-            # metrics['rm/grad_norm'] = grad_norms
-            
             self.reward_optimizer.zero_grad()
-
-            return {}
-
     
