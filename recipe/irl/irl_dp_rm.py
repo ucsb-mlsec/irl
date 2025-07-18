@@ -272,4 +272,3 @@ class DataParallelIRLRewardModel:
                 self._optimizer_step()
 
         self.reward_optimizer.zero_grad()
-    
