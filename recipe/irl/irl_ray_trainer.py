@@ -508,20 +508,14 @@ class RayIRLTrainer(RayPPOTrainer):
                     expert_flags = torch.tensor(scores) > 0.99
                     policy_batch.batch['labels'] = torch.tensor(scores)
                     policy_batch.batch['is_expert'] = expert_flags
-
-                    # batch_size = policy_batch.batch['responses'].shape[0]
-                    # scores = torch.tensor([0] * batch_size)
-                    # expert_flags = torch.tensor([False] * batch_size)
-                    # policy_batch.batch['labels'] = torch.tensor(scores)
-                    # policy_batch.batch['is_expert'] = expert_flags
-                    
-                # filter the training samples for both policy and expert
+                
                 filter_reorder_index = self.filter_and_downsample(scores, policy_batch)
                 policy_batch.reorder(filter_reorder_index[:int(len(policy_batch) // 2)])
                 
                 # load expert samples
                 expert_batch = DataProto.from_single_dict(expert_batch_dict)
                 expert_batch.reorder(filter_reorder_index[:int(len(expert_batch) // 2)])
+
 
                 expert_log_prob = self.actor_rollout_wg.compute_log_prob(expert_batch)
                 expert_batch = expert_batch.union(expert_log_prob)
@@ -591,13 +585,8 @@ class RayIRLTrainer(RayPPOTrainer):
                 # Compute reward scores after policy update and sync them across processes
                 rm_scores = self.rm_wg.compute_rm_score(batch).batch['rm_scores']
 
-                reward_metric = self.reward_metrics(batch, rm_scores)
+                reward_metric = self.reward_model_metrics(batch, rm_scores)
                 logger.log(data=reward_metric, step=self.global_steps)
-
-                policy_metric = self.policy_metrics(batch, rm_scores)
-                logger.log(data=policy_metric, step=self.global_steps)
-
-                global_avg_policy_score = policy_metric['rm_scores_for_training_policy']['is_rm_good_for_policy/policy_avg_rm_score']
 
                 policy_rollout_rm_scores = rm_scores[:len(rm_scores)//2]
                 policy_rollout_rm_scores = DataProto.from_dict(tensors={'rm_scores': policy_rollout_rm_scores})
@@ -610,8 +599,6 @@ class RayIRLTrainer(RayPPOTrainer):
                     policy_batch = compute_advantage(policy_batch, adv_estimator=self.config.algorithm.adv_estimator, config=self.config)
                     advantages = policy_batch.batch['advantages']
 
-                    # batch = compute_advantage(batch, adv_estimator=self.config.algorithm.adv_estimator, config=self.config)
-                    # advantages = batch.batch['advantages']
                     min_adv = torch.min(advantages)
                     max_adv = torch.max(advantages)
                     mean_adv = torch.mean(advantages)
@@ -631,11 +618,6 @@ class RayIRLTrainer(RayPPOTrainer):
                     
                     actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                     metrics.update(actor_output_metrics)
-
-                    # we may also don't need to verify, we need the val acc
-                    # with _timer('verify', timing_raw):
-                    #     scores = self.reward_fn.verify(batch)
-                    #     metrics['acc'] = statistics.mean(scores)
                     
                 # Collect metrics
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
@@ -650,10 +632,7 @@ class RayIRLTrainer(RayPPOTrainer):
 
                     # repeat to align with repeated responses in rollout
                     updated_policy_batch = updated_policy_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    updated_policy_batch = updated_policy_batch.union(updated_gen_batch_output)
-
-                    updated_policy_batch.reorder(filter_reorder_index[:int(len(updated_policy_batch) // 2)])
-                    
+                    updated_policy_batch = updated_policy_batch.union(updated_gen_batch_output)                    
                     updated_scores = self.reward_fn.verify(updated_policy_batch)
                     updated_expert_flags = torch.tensor(updated_scores) > 0.99
                     updated_policy_batch.batch['labels'] = torch.tensor(updated_scores)
@@ -668,37 +647,6 @@ class RayIRLTrainer(RayPPOTrainer):
                 logger.log(data={'train_accuracy': {
                     '/after_update_policy_accuracy': updated_policy_accuracy,
                     '/policy_accuracy_diff': updated_policy_accuracy - policy_accuracy,
-                }}, step=self.global_steps)
-
-                # Compute reward scores after policy update and sync them across processes
-                updated_policy_rm_scores = self.rm_wg.compute_rm_score(updated_policy_batch).batch['rm_scores']
-
-                updated_all_response_length = updated_policy_batch.batch['attention_mask'][:, -updated_policy_batch.batch['responses'].shape[-1]:].sum(-1)
-
-                sigmoid_policy_rm_scores = updated_policy_rm_scores.sigmoid()
-                # Apply the mask to zero out padding tokens
-                # Create a mask tensor of the same shape as policy_rm_scores
-                policy_response_mask = torch.zeros_like(updated_policy_rm_scores)
-                # Fill the mask with 1s for valid response tokens based on all_response_length
-                for i in range(updated_policy_rm_scores.size(0)):
-                    # Get the actual response length for this example
-                    response_len = updated_policy_batch.batch['attention_mask'][:, -updated_policy_batch.batch['responses'].shape[-1]:].sum(-1)[i]
-                    
-                    # Set mask to 1 for valid response tokens (up to response_len)
-                    policy_response_mask[i, :response_len] = 1.0
-
-                # Apply the mask to zero out padding tokens
-                masked_policy_rm_scores = sigmoid_policy_rm_scores * policy_response_mask
-
-                # Calculate average only using actual response tokens
-                avg_policy_rm_scores = torch.sum(masked_policy_rm_scores, dim=-1) / updated_all_response_length
-                
-                after_global_avg_policy_score = torch.mean(avg_policy_rm_scores).item()
-                
-                # policy_rm_scores = DataProto.from_dict(tensors={'rm_scores': policy_rm_scores})
-                logger.log(data={'rm_scores': {
-                    'after_policy_update/policy_avg_rm_score': after_global_avg_policy_score,
-                    'after_policy_update/policy_rm_score_diff': after_global_avg_policy_score - global_avg_policy_score,
                 }}, step=self.global_steps)
 
                 # Update global step
@@ -722,12 +670,7 @@ class RayIRLTrainer(RayPPOTrainer):
                 if self.global_steps >= self.total_training_steps:
                     return
 
-    def reward_metrics(self, batch, rm_scores):
-        """
-        In this function, we will calculate how good or bad the reward model is
-        basically, we treat the reward model as a binary classifier, the correct rollouts are deemed as positive samples
-        regardless of they are generated by the policy model or the expert model
-        """
+    def reward_model_metrics(self, batch, rm_scores):
         # Get policy and expert masks
         batch_size = int(rm_scores.shape[0] // 2)
 
@@ -736,168 +679,34 @@ class RayIRLTrainer(RayPPOTrainer):
         
         # Calculate effective response length
         all_response_length = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[-1]:].sum(-1)
-        
-        # Calculate policy scores
-        policy_rm_scores = rm_scores[policy_mask]
-        global_avg_policy_score = torch.mean(policy_rm_scores).item()
 
         # Create a mask tensor of the same shape as policy_rm_scores
-        policy_response_mask = torch.zeros_like(policy_rm_scores)
+        response_mask = torch.zeros_like(rm_scores)
 
         # Fill the mask with 1s for valid response tokens based on all_response_length
-        for i in range(policy_rm_scores.size(0)):
-            # Get the actual response length for this example
-            response_len = all_response_length[policy_mask][i]
-            
-            # Set mask to 1 for valid response tokens (up to response_len)
-            policy_response_mask[i, :response_len] = 1.0
-
-        # Apply sigmoid
-        sigmoid_policy_rm_scores = policy_rm_scores.sigmoid()
-
-        # Apply the mask to zero out padding tokens
-        masked_policy_rm_scores = sigmoid_policy_rm_scores * policy_response_mask
-
-        # Calculate average only using actual response tokens
-        avg_policy_rm_scores = torch.sum(masked_policy_rm_scores, dim=-1) / all_response_length[policy_mask]
-        
-
-        policy_pred = avg_policy_rm_scores > 0.5
-
-        # Get ground truth
-        policy_ground_truth = torch.tensor([False]*policy_pred.shape[0], dtype=torch.bool)
-
-        # Calculate accuracy
-        rm_policy_acc = torch.sum(policy_pred == policy_ground_truth).item() / policy_pred.shape[0]
-
-        # Calculate metrics for policy predictions
-        policy_tp = torch.sum((policy_pred == True) & (policy_ground_truth == True)).item()
-        policy_tn = torch.sum((policy_pred == False) & (policy_ground_truth == False)).item()
-        policy_fp = torch.sum((policy_pred == True) & (policy_ground_truth == False)).item()
-        policy_fn = torch.sum((policy_pred == False) & (policy_ground_truth == True)).item()
-
-        policy_fpr = policy_fp / (policy_fp + policy_tn) if (policy_fp + policy_tn) > 0 else 0
-        policy_fnr = policy_fn / (policy_fn + policy_tp) if (policy_fn + policy_tp) > 0 else 0
-
-        # Calculate expert scores  
-        expert_rm_scores = rm_scores[expert_mask]
-        global_avg_expert_score = torch.mean(expert_rm_scores).item()
-
-        # Create a mask tensor of the same shape as expert_rm_scores
-        expert_response_mask = torch.zeros_like(expert_rm_scores)
-        # Fill the mask with 1s for valid response tokens based on all_response_length
-        for i in range(expert_rm_scores.size(0)):
-            # Get the actual response length for this example
-            response_len = all_response_length[expert_mask][i]
-            
-            # Set mask to 1 for valid response tokens (up to response_len)
-            expert_response_mask[i, :response_len] = 1.0
-
-        # Apply sigmoid
-        sigmoid_expert_rm_scores = expert_rm_scores.sigmoid()
-
-        # Apply the mask to zero out padding tokens
-        masked_expert_rm_scores = sigmoid_expert_rm_scores * expert_response_mask
-
-        # Calculate average only using actual response tokens
-        avg_expert_rm_scores = torch.sum(masked_expert_rm_scores, dim=-1) / all_response_length[expert_mask]
-
-        expert_pred = avg_expert_rm_scores > 0.5
-
-        # Get ground truth
-        expert_ground_truth = torch.tensor([True]*expert_pred.shape[0], dtype=torch.bool)
-
-        # Calculate accuracy
-        rm_expert_acc = torch.sum(expert_pred == expert_ground_truth).item() / expert_pred.shape[0]
-
-        # Calculate metrics for expert predictions
-        expert_tp = torch.sum((expert_pred == True) & (expert_ground_truth == True)).item()
-        expert_tn = torch.sum((expert_pred == False) & (expert_ground_truth == False)).item()
-        expert_fp = torch.sum((expert_pred == True) & (expert_ground_truth == False)).item()
-        expert_fn = torch.sum((expert_pred == False) & (expert_ground_truth == True)).item()
-
-        expert_fpr = expert_fp / (expert_fp + expert_tn) if (expert_fp + expert_tn) > 0 else 0
-        expert_fnr = expert_fn / (expert_fn + expert_tp) if (expert_fn + expert_tp) > 0 else 0
-        
-        return {'rm_scores_itself': {
-            'is_rm_itself_good/policy_avg_rm_score': global_avg_policy_score,
-            'is_rm_itself_good/expert_avg_rm_score': global_avg_expert_score,
-            'is_rm_itself_good/policy_rm_acc': rm_policy_acc,
-            'is_rm_itself_good/expert_rm_acc': rm_expert_acc,
-            # 'before_policy_update/policy_tp': policy_tp,
-            # 'before_policy_update/policy_tn': policy_tn,
-            # 'before_policy_update/policy_fp': policy_fp,
-            # 'before_policy_update/policy_fn': policy_fn,
-            'is_rm_itself_good/policy_fpr': policy_fpr,
-            'is_rm_itself_good/policy_fnr': policy_fnr,
-            # 'before_policy_update/expert_tp': expert_tp,
-            # 'before_policy_update/expert_tn': expert_tn,
-            # 'before_policy_update/expert_fp': expert_fp,
-            # 'before_policy_update/expert_fn': expert_fn,
-            'is_rm_itself_good/expert_fpr': expert_fpr,
-            'is_rm_itself_good/expert_fnr': expert_fnr,
-        }}
-
-    def policy_metrics(self, batch, rm_scores):
-        """
-        In this function, we will calculate how good or bad the reward model for the policy model
-        this means, we want to know: is the reward model really able to distinguish the correctness of
-        rollouts generated by the policy model?
-        """
-
-        policy_rm_scores = rm_scores[:len(rm_scores)//2]
-
-        policy_labels = batch.batch['labels'][:len(rm_scores)//2]
-
-        # Calculate effective response length
-        all_response_length = batch.batch['attention_mask'][:, -batch.batch['responses'].shape[-1]:].sum(-1)
-
-        all_response_length = all_response_length[:len(rm_scores)//2]
-
-        # calculate the accuracy
-        policy_rm_scores = policy_rm_scores.sigmoid()
-
-        # Create a mask tensor of the same shape as policy_rm_scores
-        policy_response_mask = torch.zeros_like(policy_rm_scores)
-        # Fill the mask with 1s for valid response tokens based on all_response_length
-        for i in range(policy_rm_scores.size(0)):
-            # Get the actual response length for this example
+        for i in range(2 * batch_size):
             response_len = all_response_length[i]
-            
-            # Set mask to 1 for valid response tokens (up to response_len)
-            policy_response_mask[i, :response_len] = 1.0
+            response_mask[i, :response_len] = 1.0
 
-        # Apply the mask to zero out padding tokens
-        masked_policy_rm_scores = policy_rm_scores * policy_response_mask
-        # Calculate average only using actual response tokens
-        avg_policy_rm_scores = torch.sum(masked_policy_rm_scores, dim=-1) / all_response_length
-        # Calculate accuracy
-        policy_pred = avg_policy_rm_scores > 0.5
+        scores = torch.sum(rm_scores * response_mask, dim=-1)
 
-        policy_ground_truth = policy_labels
-
-        # Calculate accuracy
-        policy_accuracy = torch.sum(policy_pred == policy_ground_truth).item() / policy_pred.shape[0]
-        # Calculate metrics for policy predictions
-        policy_tp = torch.sum((policy_pred == True) & (policy_ground_truth == True)).item()
-        policy_tn = torch.sum((policy_pred == False) & (policy_ground_truth == False)).item()
-        policy_fp = torch.sum((policy_pred == True) & (policy_ground_truth == False)).item()
-        policy_fn = torch.sum((policy_pred == False) & (policy_ground_truth == True)).item()
-        policy_fpr = policy_fp / (policy_fp + policy_tn) if (policy_fp + policy_tn) > 0 else 0
-        policy_fnr = policy_fn / (policy_fn + policy_tp) if (policy_fn + policy_tp) > 0 else 0
+        expert_score = torch.mean(scores[expert_mask])
+        policy_score = torch.mean(scores[policy_mask])
         
-        return {'rm_scores_for_training_policy': {
-            'is_rm_good_for_policy/policy_avg_rm_score': torch.mean(avg_policy_rm_scores).item(),
-            'is_rm_good_for_policy/policy_rm_acc': policy_accuracy,
-            # 'after_policy_update/policy_tp': policy_tp,
-            # 'after_policy_update/policy_tn': policy_tn,
-            # 'after_policy_update/policy_fp': policy_fp,
-            # 'after_policy_update/policy_fn': policy_fn,
-            'is_rm_good_for_policy/policy_fpr': policy_fpr,
-            'is_rm_good_for_policy/policy_fnr': policy_fnr,
-        }}
+        normalized_score = scores / all_response_length
+        normalized_expert_score = torch.mean(normalized_score[expert_mask])
+        normalized_policy_score = torch.mean(normalized_score[policy_mask])
 
-
+        return {
+                'reward_model': {
+                    'expert_score': expert_score, 
+                    'policy_score': policy_score,
+                    "diff_score": policy_score - expert_score, 
+                    'normalized_expert_score': normalized_expert_score,
+                    'normalized_policy_score': normalized_policy_score,
+                    "normalized_diff_score": normalized_policy_score - normalized_expert_score,
+                }
+        }
 
     def filter_and_downsample(self, scores, batch: DataProto):
         """
@@ -922,7 +731,5 @@ class RayIRLTrainer(RayPPOTrainer):
 
         reorder_index = torch.argsort(filter_mask, descending=True)
         reorder_index = (reorder_index.unsqueeze(-1) * n_samples + torch.arange(0, n_samples).unsqueeze(0)).view(-1)
-        # batch.reorder(reorder_index[:int(len(batch) //
-        #                                  self.config.data.oversample_factor)])  # this operation is inplace
 
         return reorder_index
