@@ -8,7 +8,8 @@ defaults:
   - ppo_trainer
   - _self_
 
-data:
+# data related flags, mainly specify the data path, batch size, and context length
+data: 
   filter_accuracy: True
   accuracy_lower_bound: 0.2
   accuracy_upper_bound: 0.8
@@ -21,6 +22,7 @@ data:
   policy_val_files: []
   shuffle: False
 
+# actor and reference model related flags, mainly specify the model path, rollout parameters, and training parameters
 actor_rollout_ref:
   hybrid_engine: True
   model:
@@ -32,6 +34,7 @@ actor_rollout_ref:
   actor:
     entropy_coeff: 0.001
 
+# reward model related flags, mainly specify the reward model path, and training parameters
 reward_model:
   enable: True
   strategy: fsdp
@@ -61,15 +64,16 @@ reward_model:
   rm_epochs: 1
   reward_manager: irl
 
+# algorithm related flags, mainly specify the hyperparameters for the poilcy training algorithm
 algorithm:
-  adv_estimator: rloo
-  # now supports rloo. it treats different source of reward separately.
+  adv_estimator: rloo # rloo, grpo, gae 
   kl_ctrl:
     type: fixed
     kl_coef: 0.000
   reward_gt_coef: 5
   reward_dpo_coef: 5
 
+# trainer related flags, mainly specify how many nodes and GPU per node to use
 trainer:
   project_name: irl
   experiment_name: examples

@@ -33,9 +33,10 @@ GRPO:
     - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}]/\sigma, b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}, \sigma = std(G_t)
 """
 
-def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, n_samples, config):
-    # calculate rloo reward on different reward sources, and sum again
+def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, n_samples, config):
+
     def masked_rloo(reward_tensor_original, mask_tensor):
+        # calculate rloo reward on different reward sources, and sum again
         reward_tensor = reward_tensor_original.clone()
         reward_tensor[~mask_tensor] = 0
         returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
@@ -72,13 +73,22 @@ def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Ten
 
     reward_tensors = []
 
+    if config.algorithm.adv_estimator == 'rloo':
+        masked_adv = masked_rloo
+    elif config.algorithm.adv_estimator == 'grpo':
+        masked_adv = masked_grpo
+    elif config.algorithm.adv_estimator == 'gae':
+        masked_adv = masked_gae
+    else:
+        raise NotImplementedError
+
     with torch.no_grad():
 
         if 'rm_scores' in data.batch.keys() and config.algorithm.reward_dpo_coef != 0.:
             reward_tensor = data.batch['rm_scores']
             reward_mask = response_mask.bool()
 
-            reward_tensors.append(masked_rloo(reward_tensor, reward_mask) * config.algorithm.reward_dpo_coef)
+            reward_tensors.append(masked_adv(reward_tensor, reward_mask) * config.algorithm.reward_dpo_coef)
 
         if 'acc' in data.batch.keys() and config.algorithm.reward_gt_coef != 0.:
             reward_tensor = torch.zeros_like(response_mask, dtype=torch.float32)
@@ -95,7 +105,7 @@ def compute_rloo_advantage_return(data: verl.DataProto, response_mask: torch.Ten
                 torch.arange(0, valid_response_length.shape[0], dtype=torch.long, device=valid_response_length.device),
                 valid_response_length - 1] = data.batch['acc']
 
-            reward_tensors.append(masked_rloo(reward_tensor, reward_mask) * config.algorithm.reward_gt_coef)
+            reward_tensors.append(masked_adv(reward_tensor, reward_mask) * config.algorithm.reward_gt_coef)
 
         advantages = sum(reward_tensors)
         advantages = verl_F.masked_whiten(advantages, response_mask)

@@ -43,15 +43,12 @@ from .utils import cal_outcome_reward
 
 
 def compute_advantage(data: DataProto, adv_estimator, config):
-    if adv_estimator == 'rloo':
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-        advantages = irl_core_algos.compute_rloo_advantage_return(data, response_mask, config.actor_rollout_ref.rollout.n, config)
-        data.batch['advantages'] = advantages
-    else:
-        raise NotImplementedError
+    responses = data.batch['responses']
+    response_length = responses.size(-1)
+    attention_mask = data.batch['attention_mask']
+    response_mask = attention_mask[:, -response_length:]
+    advantages = irl_core_algos.compute_advantage_return(data, response_mask, config.actor_rollout_ref.rollout.n, config)
+    data.batch['advantages'] = advantages
     return data
 
 
