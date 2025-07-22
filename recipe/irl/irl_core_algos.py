@@ -27,49 +27,141 @@ REINFORCE:
     - advantage A_t = G_t - b_t, b_t = 0
 RLOO:
     - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
-    - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}], b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}
+    - advantage A_t^{k} = [G_t^{k} - b_t^{k}], b_t^{k} = 1/(K-1) * \sum_{k' \neq k} G_t^{k'}
 GRPO:
     - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
-    - advantage A_t = 1/K \sum_k [G_t^{k} - b_t^{k}]/\sigma, b_t^{k} = 1/(K-1) # \sum_{k' \neq k} G_t^{k'}, \sigma = std(G_t)
+    - advantage A_t^{k} =  [G_t^{k} - b_t^{k}]/\sigma, b_t^{k} = 1/(K-1) * \sum_{k' \neq k} G_t^{k'}, \sigma = std(G_t)
 """
 
+
+def masked_rloo(reward_tensor_original, mask_tensor, n_samples):
+
+    reward_tensor = reward_tensor_original.clone() # n_responses (n_samples(n_rollout) * n_inputs) x seq_len
+    reward_tensor[~mask_tensor] = 0
+    returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1]) # G_t
+    all_adjusted_returns = []
+
+    for i in range(0, returns.shape[0], n_samples):
+        # --- Get the chunk for this calculation ---
+        chunk_returns = returns[i:i + n_samples] # n_samples x seq_len; G_t^{k} k = 1, 2, ..., n_samples
+        chunk_mask = mask_tensor[i:i + n_samples].float()
+
+        # --- Calculate a per-timestep baseline ---
+        # Sum of returns from all samples in the chunk (for active tokens)
+        sum_of_chunk_returns = (chunk_returns * chunk_mask).sum(dim=0) # sum_k G_t^{k} -> seq_len
+        # Number of active samples at each timestep in the chunk
+        num_active_samples = chunk_mask.sum(dim=0) # seq_len
+
+        # Sum of returns from OTHER samples
+        sum_of_other_returns = sum_of_chunk_returns - (chunk_returns * chunk_mask) # \sum_{k' \neq k} G_t^{k'}
+        num_other_active = num_active_samples - chunk_mask # K-1
+        
+        # Clamp denominator to 1 to avoid division by zero
+        # (if a token is active where all others are padded)
+        denominator = num_other_active.clamp(min=1)
+
+        baseline = sum_of_other_returns / denominator # b_t^{k}
+        
+        adjusted_returns = chunk_returns - baseline # A_t^{k}
+        all_adjusted_returns.append(adjusted_returns)
+
+    final_returns = torch.cat(all_adjusted_returns, dim=0)
+    final_returns = final_returns * mask_tensor
+
+    return final_returns
+
+
+def masked_grpo(reward_tensor_original, mask_tensor, n_samples):
+
+    def masked_std(x, mask, eps=1e-6):
+        mask = mask.float()
+
+        cnt  = mask.sum(dim=0)                       
+        cnt_clamped = cnt.clamp(min=1)                
+        mean = (x * mask).sum(0) / cnt_clamped 
+
+        sq_diff = ((x - mean) * mask).pow(2)
+
+        var  = sq_diff.sum(dim=0) / (cnt - 1).clamp(min=1)
+        return var.sqrt().clamp_min(eps)               # σ ≥ eps
+
+    reward_tensor = reward_tensor_original.clone()
+    reward_tensor[~mask_tensor] = 0
+    returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+    all_adjusted_returns = []
+
+    for i in range(0, returns.shape[0], n_samples):
+        # --- Get the chunk for this calculation ---
+        chunk_returns = returns[i:i + n_samples]
+        chunk_mask = mask_tensor[i:i + n_samples].float()
+
+        # --- Calculate a per-timestep baseline ---
+        # Sum of returns from all samples in the chunk (for active tokens)
+        sum_of_chunk_returns = (chunk_returns * chunk_mask).sum(dim=0)
+        # Number of active samples at each timestep in the chunk
+        num_active_samples = chunk_mask.sum(dim=0)
+
+        # Sum of returns from OTHER samples
+        sum_of_other_returns = sum_of_chunk_returns - (chunk_returns * chunk_mask)
+        num_other_active = num_active_samples - chunk_mask
+        
+        # Clamp denominator to 1 to avoid division by zero
+        # (if a token is active where all others are padded)
+        denominator = num_other_active.clamp(min=1)
+
+        baseline = sum_of_other_returns / denominator
+        
+        adjusted_returns = chunk_returns - baseline
+
+        chunk_std = masked_std(chunk_returns, chunk_mask, eps=1e-6) # std(G_t^k) -> seq_len
+        adjusted_returns = adjusted_returns / chunk_std 
+
+        all_adjusted_returns.append(adjusted_returns)
+
+    final_returns = torch.cat(all_adjusted_returns, dim=0) # n_responses x seq_len
+    final_returns = final_returns * mask_tensor
+
+    return final_returns
+
+
+def masked_gae(reward_tensor_original, mask_tensor):
+    # calculate rloo reward on different reward sources, and sum again
+    reward_tensor = reward_tensor_original.clone()
+    reward_tensor[~mask_tensor] = 0
+    returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+    all_adjusted_returns = []
+
+    for i in range(0, returns.shape[0], n_samples):
+        # --- Get the chunk for this calculation ---
+        chunk_returns = returns[i:i + n_samples]
+        chunk_mask = mask_tensor[i:i + n_samples].float()
+
+        # --- Calculate a per-timestep baseline ---
+        # Sum of returns from all samples in the chunk (for active tokens)
+        sum_of_chunk_returns = (chunk_returns * chunk_mask).sum(dim=0)
+        # Number of active samples at each timestep in the chunk
+        num_active_samples = chunk_mask.sum(dim=0)
+
+        # Sum of returns from OTHER samples
+        sum_of_other_returns = sum_of_chunk_returns - (chunk_returns * chunk_mask)
+        num_other_active = num_active_samples - chunk_mask
+        
+        # Clamp denominator to 1 to avoid division by zero
+        # (if a token is active where all others are padded)
+        denominator = num_other_active.clamp(min=1)
+
+        baseline = sum_of_other_returns / denominator
+        
+        adjusted_returns = chunk_returns - baseline
+        all_adjusted_returns.append(adjusted_returns)
+
+    final_returns = torch.cat(all_adjusted_returns, dim=0)
+    final_returns = final_returns * mask_tensor
+
+    return final_returns
+
+
 def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, n_samples, config):
-
-    def masked_rloo(reward_tensor_original, mask_tensor):
-        # calculate rloo reward on different reward sources, and sum again
-        reward_tensor = reward_tensor_original.clone()
-        reward_tensor[~mask_tensor] = 0
-        returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
-        all_adjusted_returns = []
-
-        for i in range(0, returns.shape[0], n_samples):
-            # --- Get the chunk for this calculation ---
-            chunk_returns = returns[i:i + n_samples]
-            chunk_mask = mask_tensor[i:i + n_samples].float()
-
-            # --- Calculate a per-timestep baseline ---
-            # Sum of returns from all samples in the chunk (for active tokens)
-            sum_of_chunk_returns = (chunk_returns * chunk_mask).sum(dim=0)
-            # Number of active samples at each timestep in the chunk
-            num_active_samples = chunk_mask.sum(dim=0)
-
-            # Sum of returns from OTHER samples
-            sum_of_other_returns = sum_of_chunk_returns - (chunk_returns * chunk_mask)
-            num_other_active = num_active_samples - chunk_mask
-            
-            # Clamp denominator to 1 to avoid division by zero
-            # (if a token is active where all others are padded)
-            denominator = num_other_active.clamp(min=1)
-
-            baseline = sum_of_other_returns / denominator
-            
-            adjusted_returns = chunk_returns - baseline
-            all_adjusted_returns.append(adjusted_returns)
-
-        final_returns = torch.cat(all_adjusted_returns, dim=0)
-        final_returns = final_returns * mask_tensor
-
-        return final_returns
 
     reward_tensors = []
 
@@ -88,7 +180,7 @@ def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, 
             reward_tensor = data.batch['rm_scores']
             reward_mask = response_mask.bool()
 
-            reward_tensors.append(masked_adv(reward_tensor, reward_mask) * config.algorithm.reward_dpo_coef)
+            reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples) * config.algorithm.reward_dpo_coef)
 
         if 'acc' in data.batch.keys() and config.algorithm.reward_gt_coef != 0.:
             reward_tensor = torch.zeros_like(response_mask, dtype=torch.float32)
@@ -105,7 +197,7 @@ def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, 
                 torch.arange(0, valid_response_length.shape[0], dtype=torch.long, device=valid_response_length.device),
                 valid_response_length - 1] = data.batch['acc']
 
-            reward_tensors.append(masked_adv(reward_tensor, reward_mask) * config.algorithm.reward_gt_coef)
+            reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples) * config.algorithm.reward_gt_coef)
 
         advantages = sum(reward_tensors)
         advantages = verl_F.masked_whiten(advantages, response_mask)
