@@ -177,9 +177,9 @@ class RayIRLTrainer(RayPPOTrainer):
         
         if self.config.data.shuffle:
             print("Using random sampler for policy train dataset")
-            train_dataloader_generator = torch.Generator()
-            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
-            sampler = RandomSampler(data_source=self.policy_train_dataset, generator=train_dataloader_generator)
+            gen_dataloader_generator = torch.Generator()
+            gen_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+            sampler = RandomSampler(data_source=self.policy_train_dataset, generator=gen_dataloader_generator)
         else:
             sampler = SequentialSampler(data_source=self.policy_train_dataset)
 
@@ -191,6 +191,14 @@ class RayIRLTrainer(RayPPOTrainer):
             sampler=sampler
         )
 
+        if self.config.data.shuffle:
+            print("Using random sampler for policy train dataset")
+            train_dataloader_generator = torch.Generator()
+            train_dataloader_generator.manual_seed(self.config.data.get('seed', 2))
+            sampler = RandomSampler(data_source=self.policy_train_dataset, generator=train_dataloader_generator)
+        else:
+            sampler = SequentialSampler(data_source=self.policy_train_dataset)
+        
         self.policy_train_dataloader = DataLoader(
             dataset=self.policy_train_dataset, 
             batch_size=int(self.config.data.train_batch_size), 
@@ -606,10 +614,10 @@ class RayIRLTrainer(RayPPOTrainer):
                         best_val_acc = cur_val_acc
                         print(f"Best validation accuracy so far: {best_val_acc}")
                         # Save the best model
-                        self._save_checkpoint()
+                        # self._save_checkpoint()
 
-                if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                    self._save_checkpoint()
+                # if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
+                #     self._save_checkpoint()
                 
                 if self.global_steps >= self.total_training_steps:
                     return
