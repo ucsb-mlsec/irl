@@ -43,12 +43,15 @@ from .utils import cal_outcome_reward
 
 
 def compute_advantage(data: DataProto, adv_estimator, config):
-    responses = data.batch['responses']
-    response_length = responses.size(-1)
-    attention_mask = data.batch['attention_mask']
-    response_mask = attention_mask[:, -response_length:]
-    advantages = irl_core_algos.compute_advantage_return(data, response_mask, config.actor_rollout_ref.rollout.n, config)
-    data.batch['advantages'] = advantages
+    if adv_estimator == 'rloo':
+        responses = data.batch['responses']
+        response_length = responses.size(-1)
+        attention_mask = data.batch['attention_mask']
+        response_mask = attention_mask[:, -response_length:]
+        advantages = irl_core_algos.compute_rloo_advantage_return(data, response_mask, config.actor_rollout_ref.rollout.n, config)
+        data.batch['advantages'] = advantages
+    else:
+        raise NotImplementedError
     return data
 
 
@@ -180,6 +183,14 @@ class RayIRLTrainer(RayPPOTrainer):
         else:
             sampler = SequentialSampler(data_source=self.policy_train_dataset)
 
+        self.gen_dataloader = DataLoader(
+            dataset=self.policy_train_dataset, 
+            batch_size=int(self.config.data.train_batch_size), 
+            drop_last=True, 
+            collate_fn=collate_fn, 
+            sampler=sampler
+        )
+
         self.policy_train_dataloader = DataLoader(
             dataset=self.policy_train_dataset, 
             batch_size=int(self.config.data.train_batch_size), 
@@ -239,14 +250,7 @@ class RayIRLTrainer(RayPPOTrainer):
         print(f'Size of policy train dataloader: {len(self.policy_train_dataloader)}')
         print(f'Size of expert dataloader: {len(self.expert_demo_dataloader)}')
         print(f'Size of policy val dataloader: {len(self.val_dataloader)}')
-        # print("="*50)
-        # print(self.policy_train_dataset[0])
-        # print("="*50)
-        # print(self.policy_val_dataset[0])
-        # print("="*50)
-        # print(self.expert_demo_dataset[0])
 
-        # exit(0)
 
         # inject total_training_steps to actor/critic optim_config. This is hacky.
         total_training_steps = len(self.policy_train_dataloader) * self.config.trainer.total_epochs
@@ -462,14 +466,6 @@ class RayIRLTrainer(RayPPOTrainer):
         # Load checkpoint before doing anything
         self._load_checkpoint()
 
-        # # Perform validation before training
-        # if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
-        #     val_metrics = self._validate()
-        #     pprint(f'Initial validation metrics: {val_metrics}')
-        #     logger.log(data=val_metrics, step=self.global_steps)
-        #     if self.config.trainer.get('val_only', False):
-        #         return
-
         # We start from step 1
         self.global_steps += 1
         best_val_acc = 0.0
@@ -482,10 +478,75 @@ class RayIRLTrainer(RayPPOTrainer):
             print(f"Phase 1: Generating policy samples for reward model training")
             print("=" * 50)
 
-            for policy_batch_dict, expert_batch_dict in zip(self.policy_train_dataloader, self.expert_demo_dataloader):
+            for gen_batch_dict, policy_batch_dict, expert_batch_dict in zip(self.gen_dataloader, self.policy_train_dataloader, self.expert_demo_dataloader):
                 metrics = {}
                 timing_raw = {}
+                # Update reward model
+                with _timer('gen_model_rollout', timing_raw):
+                    # generate gen samples
+                    gen_batch = DataProto.from_single_dict(gen_batch_dict)
+                    # pop those keys for generation
+                    rollout_input_batch = gen_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                    gen_output = self.actor_rollout_wg.generate_sequences(rollout_input_batch)
 
+                    gen_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(gen_batch.batch))], dtype=object)
+                    # repeat to align with repeated responses in rollout
+                    gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    gen_batch = gen_batch.union(gen_output)
+
+                    gen_log_prob = self.actor_rollout_wg.compute_log_prob(gen_batch)
+                    gen_batch = gen_batch.union(gen_log_prob)
+
+                    scores = self.reward_fn.verify(gen_batch)
+                    expert_flags = torch.tensor(scores) > 0.99
+                    gen_batch.batch['labels'] = torch.tensor(scores)
+                    gen_batch.batch['is_expert'] = expert_flags
+
+                # filter the training samples for both gen and expert
+                filter_reorder_index = self.filter_and_downsample(scores, gen_batch)
+                gen_batch.reorder(filter_reorder_index[:int(len(gen_batch) // 2)])
+
+                # load expert samples
+                expert_batch = DataProto.from_single_dict(expert_batch_dict)
+                expert_batch.reorder(filter_reorder_index[:int(len(expert_batch) // 2)])
+
+                expert_log_prob = self.actor_rollout_wg.compute_log_prob(expert_batch)
+                expert_batch = expert_batch.union(expert_log_prob)
+
+                gen_batch.non_tensor_batch = {}
+                expert_batch.non_tensor_batch = {}
+                gen_batch.pop(batch_keys=['prompts'])
+                n_samples = len(gen_batch.batch['is_expert'])
+
+                # Generate gen indices (0, 1, 2, ..., n_samples-1)
+                gen_indices = torch.arange(n_samples)
+
+                # Generate expert indices (n_samples, n_samples+1, ..., 2*n_samples-1)
+                expert_indices = torch.arange(n_samples, 2*n_samples)
+
+                reorder_index = torch.zeros(2*n_samples, dtype=torch.long)
+                reorder_index[0::2] = gen_indices
+                reorder_index[1::2] = expert_indices
+
+                # reorder the gen and expert batches
+                batch = DataProto.concat([gen_batch, expert_batch])
+                batch.reorder(reorder_index)
+
+                print("batch shape: ", batch.batch["responses"].shape)
+
+                with _timer('train_reward_model', timing_raw):
+                    self.rm_wg.update_rm(batch)
+
+                gen_batch.meta_info['global_token_num'] = torch.sum(gen_batch.batch['attention_mask'], dim=-1).tolist()
+
+                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
+
+                rm_scores = self.rm_wg.compute_rm_score(batch).batch['rm_scores']
+
+                reward_metric = self.reward_model_metrics(batch, rm_scores)
+                logger.log(data=reward_metric, step=self.global_steps)
+                # Update Policy
                 with _timer('policy_model_rollout', timing_raw):
                     # generate policy samples
                     policy_batch = DataProto.from_single_dict(policy_batch_dict)
@@ -501,95 +562,10 @@ class RayIRLTrainer(RayPPOTrainer):
                     policy_log_prob = self.actor_rollout_wg.compute_log_prob(policy_batch)
                     policy_batch = policy_batch.union(policy_log_prob)
 
-                    scores = self.reward_fn.verify(policy_batch)
-                    expert_flags = torch.tensor(scores) > 0.99
-                    policy_batch.batch['labels'] = torch.tensor(scores)
-                    policy_batch.batch['is_expert'] = expert_flags
-                
-                filter_reorder_index = self.filter_and_downsample(scores, policy_batch)
-                policy_batch.reorder(filter_reorder_index[:int(len(policy_batch) // 2)])
-                
-                # load expert samples
-                expert_batch = DataProto.from_single_dict(expert_batch_dict)
-                expert_batch.reorder(filter_reorder_index[:int(len(expert_batch) // 2)])
-
-
-                expert_log_prob = self.actor_rollout_wg.compute_log_prob(expert_batch)
-                expert_batch = expert_batch.union(expert_log_prob)
-
-                policy_batch.non_tensor_batch = {}
-                expert_batch.non_tensor_batch = {}
-                policy_batch.pop(batch_keys=['prompts'])
-
-
-                policy_correct = torch.sum(policy_batch.batch['is_expert']).item()
-                policy_count = len(policy_batch.batch['is_expert'])
-                policy_accuracy = policy_correct / policy_count
-
-                expert_correct = torch.sum(expert_batch.batch['is_expert']).item()
-                expert_count = len(expert_batch.batch['is_expert'])
-                expert_accuracy = expert_correct / expert_count
-
-                logger.log(data={'train_accuracy': {
-                    '/before_update_policy_accuracy': policy_accuracy,
-                    '/before_update_expert_accuracy': expert_accuracy,
-                }}, step=self.global_steps)
-
-
-                n_samples = policy_count
-
-                # Generate policy indices (0, 1, 2, ..., n_samples-1)
-                policy_indices = torch.arange(n_samples)
-
-                # Generate expert indices (n_samples, n_samples+1, ..., 2*n_samples-1)
-                expert_indices = torch.arange(n_samples, 2*n_samples)
-
-                reorder_index = torch.zeros(2*n_samples, dtype=torch.long)
-                reorder_index[0::2] = policy_indices
-                reorder_index[1::2] = expert_indices
-
-                # reorder the policy and expert batches
-                batch = DataProto.concat([policy_batch, expert_batch])
-                batch.reorder(reorder_index)
-
-                print("batch shape: ", batch.batch["responses"].shape)
-                
-                with _timer('train_reward_model', timing_raw):
-                    self.rm_wg.update_rm(batch)
-                
                 policy_batch.meta_info['global_token_num'] = torch.sum(policy_batch.batch['attention_mask'], dim=-1).tolist()
+                policy_rm_scores = self.rm_wg.compute_rm_score(policy_batch).batch['rm_scores']
+                policy_batch.union(DataProto.from_dict(tensors={'rm_scores': policy_rm_scores}))
 
-                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
-                
-
-                # This was your interleaved index (e.g., [0, 4, 1, 5, 2, 6, 3, 7] for n_samples=4)
-                reorder_index = torch.zeros(2*n_samples, dtype=torch.long)
-                reorder_index[0::2] = torch.arange(n_samples)  # Policy indices in even positions
-                reorder_index[1::2] = torch.arange(n_samples, 2*n_samples)  # Expert indices in odd positions
-
-                # To get the inverse index, we need to figure out where each original index ends up
-                inverse_reorder_index = torch.empty_like(reorder_index)
-                inverse_reorder_index[reorder_index] = torch.arange(len(reorder_index))
-
-                # reorder the batch to match the original order, we can only use rollouts generated by the policy model to train
-                batch.reorder(inverse_reorder_index)
-
-                print("=" * 50)
-                print("Phase 2: Training policy model based on the updated reward model")
-                print("=" * 50)
-
-                # Compute reward scores after policy update and sync them across processes
-                rm_scores = self.rm_wg.compute_rm_score(batch).batch['rm_scores']
-
-                reward_metric = self.reward_model_metrics(batch, rm_scores)
-                logger.log(data=reward_metric, step=self.global_steps)
-
-                policy_rollout_rm_scores = rm_scores[:len(rm_scores)//2]
-                policy_rollout_rm_scores = DataProto.from_dict(tensors={'rm_scores': policy_rollout_rm_scores})
-                policy_batch = policy_batch.union(policy_rollout_rm_scores)
-                # rm_scores = DataProto.from_dict(tensors={'rm_scores': rm_scores})
-                # batch = batch.union(rm_scores)                
                 with _timer('update_policy_model', timing_raw):
                     # Skip generation since we already have the samples
                     # We already have the complete policy batch with generated responses
@@ -609,42 +585,13 @@ class RayIRLTrainer(RayPPOTrainer):
                 
                 # update actor
                 with _timer('update_actor', timing_raw):
-                    # actor_output = self.actor_rollout_wg.update_actor(batch)
                     actor_output = self.actor_rollout_wg.update_actor(policy_batch)
-
-                    
                     actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                     metrics.update(actor_output_metrics)
-                    
+
                 # Collect metrics
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'policy_training': metrics}, step=self.global_steps)
-
-                with torch.no_grad():
-                    # rollout again to see if the policy model is improved
-                    # generate policy samples
-                    updated_policy_batch = DataProto.from_single_dict(policy_batch_dict)
-                    updated_gen_batch = updated_policy_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
-                    updated_gen_batch_output = self.actor_rollout_wg.generate_sequences(updated_gen_batch)
-
-                    # repeat to align with repeated responses in rollout
-                    updated_policy_batch = updated_policy_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    updated_policy_batch = updated_policy_batch.union(updated_gen_batch_output)                    
-                    updated_scores = self.reward_fn.verify(updated_policy_batch)
-                    updated_expert_flags = torch.tensor(updated_scores) > 0.99
-                    updated_policy_batch.batch['labels'] = torch.tensor(updated_scores)
-                    updated_policy_batch.batch['is_expert'] = updated_expert_flags
-
-
-                updated_policy_correct = torch.sum(updated_expert_flags).item()
-                updated_policy_count = len(updated_expert_flags)
-                updated_policy_accuracy = updated_policy_correct / updated_policy_count
-
-
-                logger.log(data={'train_accuracy': {
-                    '/after_update_policy_accuracy': updated_policy_accuracy,
-                    '/policy_accuracy_diff': updated_policy_accuracy - policy_accuracy,
-                }}, step=self.global_steps)
 
                 # Update global step
                 self.global_steps += 1
