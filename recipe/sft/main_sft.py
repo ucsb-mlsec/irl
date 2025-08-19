@@ -12,7 +12,6 @@ from .sft_trainer import FSDP_SFT_Trainer
 
 # os.environ.update({
 #     "CUDA_VISIBLE_DEVICES": "7",
-#     "VLLM_ATTENTION_BACKEND": "XFORMERS", 
 #     "WANDB_API_KEY": "0da9605b7e93d6ada3221d8f5aa9df8c96a5406e",
 #     "TOKENIZERS_PARALLELISM": "false",
 #     "NCCL_DEBUG": "WARN",

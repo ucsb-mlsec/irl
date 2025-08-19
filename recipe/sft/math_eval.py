@@ -2,7 +2,7 @@
 """
 Testing for PRIME data
 """
-
+import os
 import asyncio
 import torch
 import numpy as np
@@ -13,11 +13,12 @@ from verl.utils.fs import copy_to_local
 from verl.utils import hf_tokenizer
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
-
+from vllm import LLM, SamplingParams
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
+os.environ["CUDA_VISIBLE_DEVICES"]="7"
 
 LOCAL_MODEL_PATH = "/home/henrygwb/irl/checkpoints/Qwen3-sft/global_step_20" # "Qwen/Qwen2.5-3B-Instruct"
 # default_local_dir: "/home/henrygwb/irl/checkpoints"  # Output directory for models and logs
@@ -32,8 +33,12 @@ NUM_WORKERS = 4  # Number of data loading workers
 NUM_PROCESSES = 8  # Number of processes for computating scores
 RETURN_RAW_CHAT = False #  whether to include raw data in the loaded data
 PROMPT_KEY = "prompt"  # Key containing the conversation prompt
+NUM_GPUS = 1 # number of GPUs for parallel with vllm
 TEMPERATURE = 1  # Sampling temperature for response generation
-
+N_SAMPLE = 1 # num_samples to decode
+TOP_K = -1 # top_k token
+TOP_P = 1.0 # top # tokens based on probablity 
+USE_VLLM = True
 
 class MATH_Evaluator(object):
 
@@ -103,18 +108,23 @@ class MATH_Evaluator(object):
                 scores.append(float(result[0][0]))
         return scores
 
-    def eval_single(self,
-                    data_file, 
-                    batch_size,
-                    prompt_key,
-                    max_prompt_length,
-                    max_response_length,
-                    return_raw_chat,
-                    truncation,
-                    num_workers,
-                    temperature,
-                    filter_overlong_prompts,
-                    num_processes):
+    def eval(self,
+             data_file, 
+             batch_size,
+             prompt_key,
+             max_prompt_length,
+             max_response_length,
+             return_raw_chat,
+             truncation,
+             num_workers,
+             filter_overlong_prompts,
+             num_processes,
+             num_gpus=1,
+             temperature=1,
+             n_sample=1,
+             top_k=-1,
+             top_p=1.0,
+             use_vllm=True):
 
         """
             Batch: 'input_ids', 'attention_mask', 'position_ids', 'data_source', 'ability', 'reward_model', 'extra_info', 'raw_prompt_ids', 'raw_prompt', 'index'])
@@ -123,11 +133,6 @@ class MATH_Evaluator(object):
             output keys ['prompts', 'responses', 'input_ids', 'attention_mask', 'position_ids'])) # 'input_ids', 'attention_mask', 'position_ids' connection of prompts and responses
             attention_mask: 1 means it is a valid token, 0 means it is a padding token
         """
-
-        self.model = AutoModelForCausalLM.from_pretrained(self.local_model_path, # model path in huggingface repo
-                                                          torch_dtype=torch.bfloat16,
-                                                          attn_implementation='flash_attention_2',
-                                                          trust_remote_code=self.trust_remote_code)
 
         self.val_dataset = RLHFDataset(
             parquet_files=data_file,
@@ -140,6 +145,7 @@ class MATH_Evaluator(object):
             filter_overlong_prompts=filter_overlong_prompts,
         )
                 
+        # vllm does not need distributed sampler
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=batch_size,
                                          sampler=SequentialSampler(self.val_dataset),
@@ -149,31 +155,62 @@ class MATH_Evaluator(object):
                                          collate_fn=collate_fn) # merge individual element into a batch
 
 
-        sample_scores = []
-        data_source_lst = []
+        if use_vllm: 
+            self.model = LLM(
+                model=self.local_model_path,
+                tokenizer=self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                tensor_parallel_size=num_gpus,  # Num of GPUs for parallel decoding
+                dtype='bfloat16')
+
+            print(self.model.llm_engine.model_config.attention_backend)
+
+            sampling_params = SamplingParams(
+                n=n_sample,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                max_tokens=max_response_length
+            )   # typically no need to specify padding tokens
+        else:  
+            self.model = AutoModelForCausalLM.from_pretrained(self.local_model_path, # model path in huggingface repo
+                                                            torch_dtype=torch.bfloat16,
+                                                            attn_implementation='flash_attention_2',
+                                                            trust_remote_code=self.trust_remote_code)
 
         self.model.eval().cuda()
+
+        sample_scores = []
+        data_source_lst = []
 
         for val_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(val_data)
             with torch.no_grad(): 
-                input_ids = test_batch.batch['input_ids'].cuda()
-                # input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-                attention_mask = test_batch.batch['attention_mask'].cuda()
+                input_ids = test_batch.batch['input_ids']
+                input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+                attention_mask = test_batch.batch['attention_mask']
 
-                output_ids = self.model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_response_length,
-                    do_sample=False,  # Greedy for validation
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    temperature=temperature,
-                    use_cache=True
-                )
+                if use_vllm:
+                    # Generate with vLLM - much faster batch processing!
+                    outputs = self.model.generate(input_texts, sampling_params=sampling_params)
+                    # input_ids = [ids for ids in input_dis]
+                    # outputs = self.model.generate(prompts=input_ids, sampling_params=sampling_params)
+                    sequences_str = [output.outputs[0].text for output in outputs]
+
+                else:
+                    output_ids = self.model.generate(
+                        input_ids=input_ids.cuda(),
+                        attention_mask=attention_mask.cuda(),
+                        max_new_tokens=max_response_length,
+                        do_sample=False,  # Greedy for validation
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        temperature=temperature,
+                        use_cache=True
+                    )
+                    sequences_str = [self.tokenizer.batch_decode(ids[max_prompt_length:], skip_special_tokens=True) for ids in output_ids]
                             
             # evaluate using reward_function
-            sequences_str = [self.tokenizer.batch_decode(ids[max_prompt_length:], skip_special_tokens=True) for ids in output_ids]
             ground_truth = [data_item.non_tensor_batch['reward_model']['ground_truth'] for data_item in test_batch]
             data_sources = test_batch.non_tensor_batch['data_source']
             extra_info = test_batch.non_tensor_batch.get('extra_info', None)
@@ -222,11 +259,11 @@ class MATH_Evaluator(object):
         metric_dict['val_acc/overall'] = sum(metric_dict.values()) / len(metric_dict)
         
         return metric_dict
-
+        
 
 if __name__ == "__main__":
     evaluator = MATH_Evaluator(model_path=LOCAL_MODEL_PATH, trust_remote_code=True)
-    evaluator.eval_single(
+    evaluator.eval(
         data_file=DATA_FILE,
         batch_size=VAL_BATCH_SIZE,
         prompt_key=PROMPT_KEY,
@@ -236,6 +273,11 @@ if __name__ == "__main__":
         truncation=TRUNCATE,
         num_workers=NUM_WORKERS,
         filter_overlong_prompts=FILTER_OVERLONG_PROMPTS,
-        temperature=TEMPERATURE,
         num_processes=NUM_PROCESSES,
+        num_gpus=NUM_GPUS,
+        temperature=TEMPERATURE,
+        n_sample=N_SAMPLE,
+        top_k=TOP_K,
+        top_p=TOP_P,
+        use_vllm=USE_VLLM
     )
