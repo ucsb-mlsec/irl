@@ -1,3 +1,6 @@
+*log
+verl/utils/reward_score/prime_code/__pycache__/
+checkpoints/
 .idea/
 .vscode/
 __MACOSX/
