@@ -26,7 +26,6 @@ import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
 
-from .irl_core_algos import compute_ce_dpo_loss_rm, compute_detach_dpo_loss_rm
 from verl import DataProto
 from verl.trainer.ppo import core_algos
 from verl.workers.critic import BasePPOCritic
@@ -179,6 +178,7 @@ class DataParallelIRLRewardModel:
             assert len(indices) == rm_scores.size(0), f"{len(indices)} vs. {rm_scores.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             rm_scores = rm_scores[revert_indices]
+
 
         return rm_scores
 

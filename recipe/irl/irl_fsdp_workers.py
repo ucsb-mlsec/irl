@@ -47,8 +47,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 
 from .rm import RewardModule
-from .irl_core_algos import compute_dpo_accuracy, compute_dpo_abs_accuracy
-
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
 

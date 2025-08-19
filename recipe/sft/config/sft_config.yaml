@@ -1,0 +1,62 @@
+# SFT Training Configuration
+# Configuration for supervised fine-tuning on expert demonstrations
+
+# Global GPU config
+ulysses_sequence_parallel_size: 1 # the num of GPUs to handle one sequence
+use_remove_padding: False # whether removing padding tokens; if yes, will concatenate actual tokens 
+
+# Data configuration
+data:
+  data_files:
+    - "/home/henrygwb/irl/data/prime_expert_demo.parquet"
+  train_batch_size: 16  # Training batch size
+  micro_batch_size_per_gpu: 8
+  val_batch_size: 200  # Validation batch size  
+  max_prompt_length: 2000  # Maximum length for prompts
+  max_response_length: 3000  # Maximum length for responses
+  truncation: "error"  # truncate original input if longer than max_prompt_length; left: prompt_input_ids[:, -max_prompt_length:]; right prompt_input_ids[:, :max_prompt_length]
+  filter_overlong_prompts: False  # Filter out prompts that are too long
+  num_workers: 4  # Number of data loading workers
+  balance_dp_token: False #
+  return_raw_chat: False #  whether to include raw data in the loaded data
+  prompt_key: "prompt"  # Key containing the conversation prompt
+  train_split_ratio: 0.8  # Ratio of training data
+
+# Something we can add later
+  # filter_accuracy: True, # data filtering based on accuracy 
+  # accuracy_lower_bound: 0.2",
+  # accuracy_upper_bound: 0.8
+
+# Model configuration
+model:
+  partial_pretrain: "Qwen/Qwen2.5-3B-Instruct"  # Base model to fine-tune
+  trust_remote_code: false  # Whether to trust remote code
+  use_fp16: true  # Use half precision
+  enable_gradient_checkpointing: False  # Enable gradient checkpointing to save memory
+  fsdp_config:
+    wrap_policy: 
+    cpu_offload: False 
+    offload_params: False
+  lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
+  lora_alpha: 16  # LoRA scaling factor
+  target_modules: all-linear  # Target modules for LoRA adaptation
+  use_liger: False
+  mixed_precision: True
+
+# Optimizer configuration
+optim:
+  lr: 5e-5  # Learning rate
+  betas: [0.9, 0.95]  # Adam beta parameters
+  weight_decay: 0.01  # Weight decay
+  warmup_steps_ratio: 0.1  # Warmup steps as ratio of total steps
+  clip_grad: 1.0  # Gradient clipping norm 
+
+# Training configuration
+trainer:
+  total_epochs: 3  # Number of training epochs
+  default_local_dir: "/home/henrygwb/irl/checkpoints"  # Output directory for models and logs
+  default_hdfs_dir: "/home/henrygwb/irl/checkpoints"  # HDFS output directory for models and logs
+  project_name: irl-sft
+  experiment_name: test
+  logger: ['console']
+  val_freqs: 1
