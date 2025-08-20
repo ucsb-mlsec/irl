@@ -3,12 +3,18 @@
 Testing for PRIME data
 """
 import os
+
+import psutil
+os.environ["CUDA_VISIBLE_DEVICES"]="6,7"
+os.environ["VLLM_ATTENTION_BACKEND"]="FLASH_ATTN"
+os.environ["TOKENIZERS_PARALLELISM"]="False"
+
 import asyncio
 import torch
 import numpy as np
 from collections import defaultdict
 from transformers import AutoModelForCausalLM
-from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler
+from torch.utils.data import DataLoader, SequentialSampler
 from verl.utils.fs import copy_to_local
 from verl.utils import hf_tokenizer
 from verl import DataProto
@@ -17,28 +23,30 @@ from vllm import LLM, SamplingParams
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+# import multiprocessing
+# multiprocessing.set_start_method('spawn', force=True)
 
-os.environ["CUDA_VISIBLE_DEVICES"]="7"
-
+# LOCAL_MODEL_PATH = "Qwen/Qwen2.5-3B-Instruct" 
 LOCAL_MODEL_PATH = "/home/henrygwb/irl/checkpoints/Qwen3-sft/global_step_20" # "Qwen/Qwen2.5-3B-Instruct"
 # default_local_dir: "/home/henrygwb/irl/checkpoints"  # Output directory for models and logs
 # default_hdfs_dir: "/home/henrygwb/irl/checkpoints"  # HDFS output directory for models and logs
 DATA_FILE = "/home/henrygwb/irl/data/validation.parquet"
-VAL_BATCH_SIZE = 4  # Validation batch size
-MAX_PROMPT_LENGTH = 1000  # Maximum length for prompts
-MAX_RESPONSE_LENGTH = 30  # Maximum length for responses
+VAL_BATCH_SIZE = 10  # Validation batch size
+MAX_PROMPT_LENGTH = 1500  # Maximum length for prompts
+MAX_RESPONSE_LENGTH = 3000  # Maximum length for responses
 TRUNCATE = "error"  # truncate original input if longer than max_prompt_length; left: prompt_input_ids[:, -max_prompt_length:]; right prompt_input_ids[:, :max_prompt_length]
 FILTER_OVERLONG_PROMPTS = False  # Filter out prompts that are too long
 NUM_WORKERS = 4  # Number of data loading workers
-NUM_PROCESSES = 8  # Number of processes for computating scores
+NUM_PROCESSES = 64  # Number of processes for computating scores
 RETURN_RAW_CHAT = False #  whether to include raw data in the loaded data
 PROMPT_KEY = "prompt"  # Key containing the conversation prompt
-NUM_GPUS = 1 # number of GPUs for parallel with vllm
+NUM_GPUS = 2 # number of GPUs for parallel with vllm
 TEMPERATURE = 1  # Sampling temperature for response generation
 N_SAMPLE = 1 # num_samples to decode
 TOP_K = -1 # top_k token
 TOP_P = 1.0 # top # tokens based on probablity 
 USE_VLLM = True
+
 
 class MATH_Evaluator(object):
 
@@ -50,18 +58,25 @@ class MATH_Evaluator(object):
 
     @staticmethod
     async def _single_compute_score(evaluation_func, completion, reference, task, task_extra_info, executor, timeout=300.):
-        loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop() # asyncio event loop - the engine that coordinates all async operations 
+        # The loop takes a synchronous function (_default_compute_score) and runs it in a separate process, while making it awaitable in the async context.
+
+        # This is what happens:
+        # 1. Main thread: async function calls _single_compute_score
+        # 2. Event loop: Takes sync function and submits it to ProcessPoolExecutor  
+        # 3. Separate process: Runs the actual scoring function
+        # 4. Event loop: Waits for result and returns it to main thread
+
         try:
             # Ensure process_completion is called properly
-            tasks = [
-                asyncio.wait_for(
+            result = await asyncio.wait_for(
                     loop.run_in_executor(
                         executor,
                         partial(evaluation_func, task, completion, reference, task_extra_info)  # Ensure synchronous
                     ),
-                    timeout=timeout)
-            ]
-            return await asyncio.gather(*tasks)
+                    timeout=timeout
+                    )
+            return result
         except asyncio.TimeoutError:
             print(f"Timeout occurred for completion: {completion}")
             return None  # Default value for timed-out rows
@@ -69,7 +84,7 @@ class MATH_Evaluator(object):
             print(f"Error processing completion: {completion[:10]}, Error: {e}")
             return None  # Default value for failed rows
 
-
+    # kill the process.... after running, seems seeing the num of process increasing
     async def _parallel_compute_score_async(self,
                                             evaluation_func,
                                             completions,
@@ -78,7 +93,12 @@ class MATH_Evaluator(object):
                                             extra_info=None,
                                             num_processes=64):
         scores = []
-        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        main_process = psutil.Process(os.getpid())
+
+        # children = len(main_process.children(recursive=True))
+        # print(f"Processes before ProcessPoolExecutor: {children}")
+    
+        with ProcessPoolExecutor(max_workers=num_processes) as executor: # automatically clean up the 64 sub-processes created here
             if extra_info is None:
                 extra_info = [None] * len(tasks)
             # Create tasks for all rows
@@ -87,25 +107,26 @@ class MATH_Evaluator(object):
                 for completion, reference, task, task_extra_info in zip(completions, references, tasks, extra_info)
             ]
             # to prevent very occasional starvation caused by some anomalous programs ( like infinite loop ), the exceptions in async programs will instantly halt the evaluation, and all summoned processes will be killed.
-            try:
-                results = await asyncio.gather(*tasks_async, return_exceptions=False)
-            except:
-                for pid, proc in executor._processes.items():
-                    try:
-                        proc.kill()
-                    except Exception as kill_err:
-                        print('shut down failed: ' + str(kill_err))
-                raise
+            results = await asyncio.gather(*tasks_async, return_exceptions=False)
+
+            # children = len(main_process.children(recursive=True))
+            # print(f"Processes before ProcessPoolExecutor: {children}")
+
+            # for _, proc in executor._processes.items():
+            #     proc.kill()
+
+        # children = len(main_process.children(recursive=True))
+        # print(f"Processes before ProcessPoolExecutor: {children}")
 
         # Process results
-        for result, completion, reference, task in zip(results, completions, references, tasks):
+        for result in results:
             if isinstance(result, Exception) or result is None:
                 # Handle failed or timed-out tasks
                 scores.append(0.0)
-            elif isinstance(result[0], (int, float, bool)):
-                scores.append(float(result[0]))
+            elif isinstance(result, (int, float, bool)):
+                scores.append(float(result))
             else:
-                scores.append(float(result[0][0]))
+                scores.append(float(result[0]))
         return scores
 
     def eval(self,
@@ -146,24 +167,31 @@ class MATH_Evaluator(object):
         )
                 
         # vllm does not need distributed sampler
-        self.val_dataloader = DataLoader(dataset=self.val_dataset,
-                                         batch_size=batch_size,
-                                         sampler=SequentialSampler(self.val_dataset),
-                                         num_workers=num_workers,
-                                         pin_memory=True,
-                                         drop_last=True,
-                                         collate_fn=collate_fn) # merge individual element into a batch
-
+        if VAL_BATCH_SIZE == -1:
+            self.val_dataloader = DataLoader(dataset=self.val_dataset,
+                                            batch_size=len(self.val_dataset),
+                                            sampler=SequentialSampler(self.val_dataset),
+                                            num_workers=num_workers,
+                                            pin_memory=True,
+                                            drop_last=True,
+                                            collate_fn=collate_fn) # merge individual element into a batch
+        else:
+            self.val_dataloader = DataLoader(dataset=self.val_dataset,
+                                            batch_size=VAL_BATCH_SIZE,
+                                            sampler=SequentialSampler(self.val_dataset),
+                                            num_workers=num_workers,
+                                            pin_memory=True,
+                                            drop_last=True,
+                                            collate_fn=collate_fn) # merge individual element into a batch
 
         if use_vllm: 
+            # check attention_backend
             self.model = LLM(
                 model=self.local_model_path,
-                tokenizer=self.tokenizer,
+                tokenizer=self.local_model_path,
                 trust_remote_code=self.trust_remote_code,
                 tensor_parallel_size=num_gpus,  # Num of GPUs for parallel decoding
                 dtype='bfloat16')
-
-            print(self.model.llm_engine.model_config.attention_backend)
 
             sampling_params = SamplingParams(
                 n=n_sample,
@@ -177,13 +205,14 @@ class MATH_Evaluator(object):
                                                             torch_dtype=torch.bfloat16,
                                                             attn_implementation='flash_attention_2',
                                                             trust_remote_code=self.trust_remote_code)
-
-        self.model.eval().cuda()
+            self.model.eval().cuda()
 
         sample_scores = []
         data_source_lst = []
 
+        batch = 0
         for val_data in self.val_dataloader:
+            print(f"Processing batch {batch} out of {len(self.val_dataloader)}")
             test_batch = DataProto.from_single_dict(val_data)
             with torch.no_grad(): 
                 input_ids = test_batch.batch['input_ids']
@@ -236,7 +265,7 @@ class MATH_Evaluator(object):
 
             sample_scores.extend(scores)
             data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * len(scores)))
-
+            batch += 1
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         dataset_totals = defaultdict(int)
@@ -263,7 +292,7 @@ class MATH_Evaluator(object):
 
 if __name__ == "__main__":
     evaluator = MATH_Evaluator(model_path=LOCAL_MODEL_PATH, trust_remote_code=True)
-    evaluator.eval(
+    metric_dict = evaluator.eval(
         data_file=DATA_FILE,
         batch_size=VAL_BATCH_SIZE,
         prompt_key=PROMPT_KEY,
@@ -281,3 +310,4 @@ if __name__ == "__main__":
         top_p=TOP_P,
         use_vllm=USE_VLLM
     )
+    print(metric_dict)
