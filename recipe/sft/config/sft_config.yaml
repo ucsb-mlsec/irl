@@ -12,7 +12,7 @@ data:
   train_batch_size: 16  # Training batch size
   micro_batch_size_per_gpu: 8
   val_batch_size: 200  # Validation batch size  
-  max_prompt_length: 2000  # Maximum length for prompts
+  max_prompt_length: 1500  # Maximum length for prompts
   max_response_length: 3000  # Maximum length for responses
   truncation: "error"  # truncate original input if longer than max_prompt_length; left: prompt_input_ids[:, -max_prompt_length:]; right prompt_input_ids[:, :max_prompt_length]
   filter_overlong_prompts: False  # Filter out prompts that are too long
@@ -45,7 +45,7 @@ model:
 
 # Optimizer configuration
 optim:
-  lr: 5e-5  # Learning rate
+  lr: 1e-6  # Learning rate
   betas: [0.9, 0.95]  # Adam beta parameters
   weight_decay: 0.01  # Weight decay
   warmup_steps_ratio: 0.1  # Warmup steps as ratio of total steps
@@ -53,10 +53,10 @@ optim:
 
 # Training configuration
 trainer:
-  total_epochs: 3  # Number of training epochs
+  total_epochs: 1  # Number of training epochs
   default_local_dir: "/home/henrygwb/irl/checkpoints"  # Output directory for models and logs
   default_hdfs_dir: "/home/henrygwb/irl/checkpoints"  # HDFS output directory for models and logs
-  project_name: irl-sft
+  project_name: Qwen2.5-3B-sft
   experiment_name: test
   logger: ['console']
-  val_freqs: 1
+  val_freqs: 10

@@ -11,16 +11,17 @@ from verl.utils.distributed import initialize_global_process_group
 from .sft_trainer import FSDP_SFT_Trainer
 
 # os.environ.update({
-#     "CUDA_VISIBLE_DEVICES": "7",
+#     "CUDA_VISIBLE_DEVICES": "6,7",
 #     "WANDB_API_KEY": "0da9605b7e93d6ada3221d8f5aa9df8c96a5406e",
 #     "TOKENIZERS_PARALLELISM": "false",
 #     "NCCL_DEBUG": "WARN",
 #     "RANK": "0",
-#     "WORLD_SIZE": "1", 
+#     "WORLD_SIZE": "2", 
 #     "LOCAL_RANK": "0",
 #     "MASTER_ADDR": "localhost",
 #     "MASTER_PORT": "12355"
 # })
+
 
 @hydra.main(config_path="config", config_name="sft_config", version_base=None) # it will read the default config from the sft_config.yaml file
 def main(config: DictConfig) -> None:

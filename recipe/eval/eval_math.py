@@ -5,7 +5,7 @@ Testing for PRIME data
 import os
 
 import psutil
-os.environ["CUDA_VISIBLE_DEVICES"]="6,7"
+os.environ["CUDA_VISIBLE_DEVICES"]="0,1"
 os.environ["VLLM_ATTENTION_BACKEND"]="FLASH_ATTN"
 os.environ["TOKENIZERS_PARALLELISM"]="False"
 
@@ -27,11 +27,11 @@ from functools import partial
 # multiprocessing.set_start_method('spawn', force=True)
 
 # LOCAL_MODEL_PATH = "Qwen/Qwen2.5-3B-Instruct" 
-LOCAL_MODEL_PATH = "/home/henrygwb/irl/checkpoints/Qwen3-sft/global_step_20" # "Qwen/Qwen2.5-3B-Instruct"
+LOCAL_MODEL_PATH = "/home/henrygwb/irl/checkpoints/Qwen2.5-3B-sft/global_step_10" # "Qwen/Qwen2.5-3B-Instruct"
 # default_local_dir: "/home/henrygwb/irl/checkpoints"  # Output directory for models and logs
 # default_hdfs_dir: "/home/henrygwb/irl/checkpoints"  # HDFS output directory for models and logs
 DATA_FILE = "/home/henrygwb/irl/data/validation.parquet"
-VAL_BATCH_SIZE = 10  # Validation batch size
+VAL_BATCH_SIZE = -1  # Validation batch size
 MAX_PROMPT_LENGTH = 1500  # Maximum length for prompts
 MAX_RESPONSE_LENGTH = 3000  # Maximum length for responses
 TRUNCATE = "error"  # truncate original input if longer than max_prompt_length; left: prompt_input_ids[:, -max_prompt_length:]; right prompt_input_ids[:, :max_prompt_length]

@@ -493,10 +493,12 @@ class FSDP_SFT_Trainer(object):
         global_step = 0
 
         for epoch in range(self.config.trainer.total_epochs):
-            print(f"Starting epoch {epoch+1}/{self.config.trainer.total_epochs}")
+            if rank == 0:
+                print(f"Starting epoch {epoch+1}/{self.config.trainer.total_epochs}")
             self.train_sampler.set_epoch(epoch=epoch)
             for data in self.train_dataloader:
-                print('=====================================================================')
+                if rank == 0:
+                    print('=====================================================================')
                 global_step += 1
                 data = TensorDict(data, batch_size=self.config.data.train_batch_size).cuda()
                 metric = self.training_step(data)
@@ -531,7 +533,8 @@ class FSDP_SFT_Trainer(object):
                     #         loss /= self.device_mesh.size(0)
                     #         loss_all_1.append(loss)
                     # assert True
-                print('=====================================================================')
+                if rank == 0:
+                    print('=====================================================================')
 
         return
 
