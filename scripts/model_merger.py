@@ -21,9 +21,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClas
 from concurrent.futures import ThreadPoolExecutor
 from torch.distributed._tensor import DTensor, Shard, Placement
 from safetensors.torch import load_file
+from verl.utils import hf_tokenizer
 
-from verl.utils.megatron_utils import get_model_checkpoint_path, get_hf_model_checkpoint_path
-
+# Running script:
+#   python scripts/model_merger.py     --backend fsdp     --hf_model_path Qwen/Qwen2.5-3B-Instruct     --local_dir /scr/xian/rloo/best_model/actor     --target_dir /scr/xian/rloo/final_model
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', type = str, required=True, help="The backend of the model")
 parser.add_argument('--tie-word-embedding', action='store_true', help="Whether to tie word embedding weights")
@@ -177,6 +178,11 @@ def convert_fsdp_checkpoints_to_hfmodels():
 
     print(f'Saving model to {hf_path}')
     model.save_pretrained(hf_path, state_dict=state_dict)
+    tokenizer = hf_tokenizer(args.hf_model_path)
+    tokenizer.save_pretrained(hf_path)
+
+
+
     del state_dict
     del model
     if args.hf_upload_path:
@@ -204,189 +210,6 @@ def check_megatron_checkpoint_path(model_path):
         if pp_size < pp_rank + 1:
             pp_size = pp_rank + 1
     return sharded_dirs, tp_size, pp_size
-
-def convert_megatron_checkpoints_to_hfmodes():
-    local_path = args.local_dir
-    
-    model_ckpt_path = get_model_checkpoint_path(local_path)
-    hf_model_ckpt_path = get_hf_model_checkpoint_path(local_path)
-    sharded_dirs, tp_size, pp_size = check_megatron_checkpoint_path(model_ckpt_path)
-    mp_size = len(sharded_dirs)
-    
-    model_state_dict_lst = []
-    for i in range(pp_size):
-        model_state_dict_lst.append([])
-        for j in range(tp_size):
-            model_state_dict_lst[i].append("")
-    
-    print(f'sharded_dirs: {sharded_dirs}, tp_size: {tp_size}, pp_size: {pp_size}, mp_size: {mp_size}')
-    
-    def process_one_shard(shard_dir):
-        model_path = os.path.join(model_ckpt_path, shard_dir, "model.pt")
-        state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
-        tp_rank, pp_rank = get_tp_pp_rank_from_sharded_dir(shard_dir)
-        model_state_dict_lst[pp_rank][tp_rank] = state_dict
-
-    # with ThreadPoolExecutor(max_workers=min(32, os.cpu_count())) as executor:
-    #     for rank in range(1, mp_size):
-    #         executor.submit(process_one_shard, sharded_dirs[rank])
-    for sharded_dir in sharded_dirs:
-        process_one_shard(sharded_dir)
-    
-    state_dict = {}
-    config = AutoConfig.from_pretrained(args.hf_model_path)
-    if args.test:
-        ref_state_dict = load_file(os.path.join(args.test_hf_dir, 'model.safetensors'))
-    
-    def merge_across_tp(key, tp_data):
-        if "linear_fc1.weight" in key:
-            # if the tensor is gate and proj
-            gate_lst = []
-            up_lst = []
-            for infer_param in tp_data:
-                gate, up = infer_param.chunk(2)
-                gate_lst.append(gate)
-                up_lst.append(up)
-            gate = torch.cat(gate_lst, dim=0)
-            up = torch.cat(up_lst, dim=0)
-            tp_data = [gate, up]
-        elif "self_attention.linear_qkv." in key and 'layer_norm' not in key:
-            # if the tensor is qkv, for each param on tp, split into q, k, v
-            # concat q, k, v separately.
-            q_lst = []
-            k_lst = []
-            v_lst = []
-            assert config.num_attention_heads % config.num_key_value_heads == 0
-            num_q_per_kv = config.num_attention_heads // config.num_key_value_heads
-            assert tp_data[0].shape[0] % (num_q_per_kv + 2) == 0
-            kv_size_per_tp = tp_data[0].shape[0] // (num_q_per_kv + 2)
-            split_size = [kv_size_per_tp * num_q_per_kv, kv_size_per_tp, kv_size_per_tp]
-            for infer_param in tp_data:
-                num_query_groups_per_partition = config.num_key_value_heads // tp_size
-                for chunk in infer_param.chunk(num_query_groups_per_partition):
-                    split_size = [
-                        kv_size_per_tp * num_q_per_kv // num_query_groups_per_partition,
-                        kv_size_per_tp // num_query_groups_per_partition,
-                        kv_size_per_tp // num_query_groups_per_partition
-                    ]
-                    q, k, v = chunk.split(split_size)
-                    q_lst.append(q)
-                    k_lst.append(k)
-                    v_lst.append(v)
-            q = torch.cat(q_lst, dim=0)
-            k = torch.cat(k_lst, dim=0)
-            v = torch.cat(v_lst, dim=0)
-
-            tp_data = [q,k,v]
-            
-        elif "layer_norm" in key or "layernorm" in key or "output_layer" in key and args.is_value_model:
-            tp_data = tp_data[0]
-        else:
-            dim = 0
-            if "linear_fc2.weight" in key or "self_attention.linear_proj" in key:
-                dim = 1
-            tp_data = torch.cat(tp_data, dim=dim)
-            
-
-        return tp_data
-
-    vpp_size = len(model_state_dict_lst[0][0])
-    layers_cum = 0
-    for vpp_rank in range(vpp_size):
-        for pp_rank in range(pp_size):
-            layers_handled = 0
-            keys = model_state_dict_lst[pp_rank][0][vpp_rank].keys()
-            for key in keys:
-                if "extra_state" in key:
-                    continue
-                if args.tie_word_embedding and ("output_layer" in key):
-                    print(f'skip lm_head and reward_head loading because of tie_word_embeddings')
-                    continue
-                new_key = key
-                if "decoder.layers." in key:
-                    local_layer_no = int(key.split('.')[2])
-                    layers_handled = max(local_layer_no, layers_handled)
-                    global_layer_no = local_layer_no + layers_cum
-                    new_key_list=key.split('.')
-                    new_key_list[2] = str(global_layer_no)
-                    new_key = '.'.join(new_key_list)
-
-                tp_data = [model_state_dict_lst[pp_rank][tp_rank][vpp_rank][key] for tp_rank in range(tp_size)]
-                merged = merge_across_tp(new_key, tp_data)
-                if not isinstance(merged,list):
-                    state_dict[new_key] = merged
-                elif len(merged)==3:
-                    # split qkv
-                    for n,d in zip(['q','k','v'], merged):
-                        state_dict[new_key.replace("linear_qkv",f"linear_{n}")] = d
-                elif len(merged)==2:
-                    # split gate up
-                    state_dict[new_key.replace("linear_fc1","gate_proj")] = merged[0]
-                    state_dict[new_key.replace("linear_fc1","up_proj")] = merged[1]
-            layers_cum += layers_handled+1 # zero based
-
-    del model_state_dict_lst
-
-    params_mapping = [
-        # (megatron core gpt model name, vllm model name)
-        ("self_attention.linear_qkv.layer_norm_weight", "input_layernorm.weight"),
-        ("self_attention.linear_qkv.layer_norm_bias", "input_layernorm.bias"),
-        ("embedding.word_embeddings", "model.embed_tokens"),
-        ("self_attention.linear_qkv", "self_attn.qkv_proj"),
-        ("self_attention.linear_proj", "self_attn.o_proj"),
-        ("pre_mlp_layernorm", "post_attention_layernorm"),
-        ("mlp.linear_fc1.layer_norm_weight", "post_attention_layernorm.weight"),
-        ("mlp.linear_fc1.layer_norm_bias", "post_attention_layernorm.bias"),
-        ("mlp.linear_fc1", "mlp.gate_up_proj"),
-        ("mlp.linear_fc2", "mlp.down_proj"),
-        ("decoder.final_layernorm", "model.norm"),
-        ("output_layer", "lm_head"),
-        ("self_attention.linear_q", "self_attn.q_proj"),
-        ("self_attention.linear_k", "self_attn.k_proj"),
-        ("self_attention.linear_v", "self_attn.v_proj"),
-    ]
-    
-    if args.test:
-
-        for original_name, loaded_weight in state_dict.items():
-            name = _replace_name(original_name, params_mapping)
-            if not name or name.endswith(".bias") and name not in ref_state_dict:
-                continue
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if args.tie_word_embedding and "lm_head.weight" in name:
-                continue
-            if name not in ref_state_dict:
-                raise RuntimeError(f'key: {name} not exist in state_dict')
-            param = ref_state_dict[name]
-            assert loaded_weight.dtype == param.dtype
-            torch.testing.assert_close(loaded_weight, param, atol=1e-4, rtol=1e-4)
-    
-    print('Writing to local disk')
-    if args.target_dir is None:
-        hf_path = os.path.join(args.local_dir, 'huggingface')
-    else:
-        hf_path = args.target_dir
-
-    if 'ForTokenClassification' in config.architectures[0]:
-        auto_model = AutoModelForTokenClassification
-    elif 'ForCausalLM' in config.architectures[0]:
-        auto_model = AutoModelForCausalLM
-    elif 'ForConditionalGeneration' in config.architectures[0]:
-        auto_model = AutoModelForVision2Seq
-    else:
-        raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
-
-    with torch.device('meta'):
-        model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
-    model.to_empty(device='cpu')
-
-    print(f'Saving model to {hf_path}')
-    model.save_pretrained(hf_path, state_dict=state_dict)
-    del state_dict
-    del model
-    if args.hf_upload_path:
-        upload_model_to_huggingface(hf_path)
     
 
 def _replace_name(megatron_name, name_mapping):
@@ -414,7 +237,5 @@ def _replace_name(megatron_name, name_mapping):
 if __name__ == '__main__':
     if args.backend == "fsdp":
         convert_fsdp_checkpoints_to_hfmodels()
-    elif args.backend == "megatron":
-        convert_megatron_checkpoints_to_hfmodes()
     else:
         raise NotImplementedError(f"{args.backend} not supported")
