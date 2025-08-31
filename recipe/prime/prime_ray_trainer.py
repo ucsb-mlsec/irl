@@ -244,11 +244,15 @@ class RayPRIMETrainer(RayPPOTrainer):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, is_best=False):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
-        local_global_step_folder = os.path.join(self.config.trainer.default_local_dir,
-                                                f'global_step_{self.global_steps}')
-        print(f'local_global_step_folder: {local_global_step_folder}')
+        if is_best:
+            local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, 'best_model')
+        else:
+            local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f'global_step_{self.global_steps}')
+
+        if not os.path.exists(local_global_step_folder):
+            os.makedirs(local_global_step_folder, exist_ok=True)
         actor_local_path = os.path.join(local_global_step_folder, 'actor')
 
         actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
@@ -434,6 +438,7 @@ class RayPRIMETrainer(RayPPOTrainer):
                           config=OmegaConf.to_container(self.config, resolve=True))
 
         self.global_steps = 0
+        best_val_acc = 0.0
 
         # load checkpoint before doing anything
         self._load_checkpoint()
@@ -579,6 +584,13 @@ class RayPRIMETrainer(RayPPOTrainer):
                             val_metrics: dict = self._validate()
                         metrics.update(val_metrics)
 
+                        cur_val_acc = val_metrics.get('val_acc/overall', 0.0)
+                        if cur_val_acc > best_val_acc:  
+                            best_val_acc = cur_val_acc
+                            print(f"Best validation accuracy so far: {best_val_acc}")
+                            # Save the best model
+                            self._save_checkpoint(is_best=True)
+
                     # if self.config.trainer.save_freq > 0 and \
                     #         self.global_steps % self.config.trainer.save_freq == 0:
                     #     with _timer('save_checkpoint', timing_raw):
@@ -600,10 +612,6 @@ class RayPRIMETrainer(RayPPOTrainer):
                         val_metrics = self._validate()
                         pprint(f'Final validation metrics: {val_metrics}')
                         logger.log(data=val_metrics, step=self.global_steps)
-                    if self.config.trainer.save_freq > 0 and \
-                            (self.global_steps - 1) % self.config.trainer.save_freq != 0:
-                        with _timer('save_checkpoint', timing_raw):
-                            self._save_checkpoint()
                     return
 
     def filter_and_downsample(self, scores, batch: DataProto):

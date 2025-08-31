@@ -100,10 +100,13 @@ class PrimeRewardManager:
 
         response_ids = data.batch['responses']
         sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-        ground_truth = [data_item.non_tensor_batch['reward_model']['ground_truth'] for data_item in data]
         data_sources = data.non_tensor_batch['data_source']
         extra_info = data.non_tensor_batch.get('extra_info', None)
-
+        ground_truth = [
+            (b['answer'] if 'answer' in (b := data_item.non_tensor_batch)
+            else (b['reward_model']['ground_truth'] if isinstance(b.get('reward_model'), dict) and 'ground_truth' in b['reward_model'] else None))
+            for data_item in data
+        ]
         assert len(sequences_str) == len(ground_truth) == len(data_sources)
         try:
             scores = asyncio.run(
