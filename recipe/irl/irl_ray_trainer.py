@@ -570,7 +570,10 @@ class RayIRLTrainer(RayPPOTrainer):
 
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
-                
+
+
+                resp_metric = compute_data_metrics(batch=batch)
+                logger.log(data={"Response info": resp_metric}, step=self.global_steps)
 
                 # This was your interleaved index (e.g., [0, 4, 1, 5, 2, 6, 3, 7] for n_samples=4)
                 reorder_index = torch.zeros(2*n_samples, dtype=torch.long)
@@ -641,32 +644,6 @@ class RayIRLTrainer(RayPPOTrainer):
                 # Collect metrics
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'policy_training': metrics}, step=self.global_steps)
-
-                with torch.no_grad():
-                    # rollout again to see if the policy model is improved
-                    # generate policy samples
-                    updated_policy_batch = DataProto.from_single_dict(policy_batch_dict)
-                    updated_gen_batch = updated_policy_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
-                    updated_gen_batch_output = self.actor_rollout_wg.generate_sequences(updated_gen_batch)
-
-                    # repeat to align with repeated responses in rollout
-                    updated_policy_batch = updated_policy_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    updated_policy_batch = updated_policy_batch.union(updated_gen_batch_output)                    
-                    updated_scores = self.reward_fn.verify(updated_policy_batch)
-                    updated_expert_flags = torch.tensor(updated_scores) > 0.99
-                    updated_policy_batch.batch['labels'] = torch.tensor(updated_scores)
-                    updated_policy_batch.batch['is_expert'] = updated_expert_flags
-
-
-                updated_policy_correct = torch.sum(updated_expert_flags).item()
-                updated_policy_count = len(updated_expert_flags)
-                updated_policy_accuracy = updated_policy_correct / updated_policy_count
-
-
-                logger.log(data={'train_accuracy': {
-                    '/after_update_policy_accuracy': updated_policy_accuracy,
-                    '/policy_accuracy_diff': updated_policy_accuracy - policy_accuracy,
-                }}, step=self.global_steps)
 
                 # Update global step
                 self.global_steps += 1
