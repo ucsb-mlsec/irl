@@ -54,29 +54,15 @@ def compute_advantage(data: DataProto, adv_estimator, config):
 
 
 def compute_data_metrics(batch):
-
-    advantages = batch.batch['advantages']
     max_response_length = batch.batch['responses'].shape[-1]
-
     prompt_mask = batch.batch['attention_mask'][:, :-max_response_length].bool()
-    response_mask = batch.batch['attention_mask'][:, -max_response_length:].bool()
-
     max_prompt_length = prompt_mask.size(-1)
 
     response_info = _compute_response_info(batch)
     prompt_length = response_info['prompt_length']
     response_length = response_info['response_length']
 
-    valid_adv = torch.masked_select(advantages, response_mask)
-
     metrics = {
-        # adv
-        'critic/advantages/mean':
-            torch.mean(valid_adv).detach().item(),
-        'critic/advantages/max':
-            torch.max(valid_adv).detach().item(),
-        'critic/advantages/min':
-            torch.min(valid_adv).detach().item(),
         # response length
         'response_length/mean':
             torch.mean(response_length).detach().item(),
@@ -515,6 +501,7 @@ class RayIRLTrainer(RayPPOTrainer):
                     policy_batch.batch['labels'] = torch.tensor(scores)
                     policy_batch.batch['is_expert'] = expert_flags
                 
+
                 filter_reorder_index = self.filter_and_downsample(scores, policy_batch)
                 policy_batch.reorder(filter_reorder_index[:int(len(policy_batch) // 2)])
                 
@@ -571,7 +558,6 @@ class RayIRLTrainer(RayPPOTrainer):
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
 
-
                 resp_metric = compute_data_metrics(batch=batch)
                 logger.log(data={"Response info": resp_metric}, step=self.global_steps)
 
@@ -600,6 +586,12 @@ class RayIRLTrainer(RayPPOTrainer):
                 policy_rollout_rm_scores = rm_scores[:len(rm_scores)//2]
                 policy_rollout_rm_scores = DataProto.from_dict(tensors={'rm_scores': policy_rollout_rm_scores})
                 policy_batch = policy_batch.union(policy_rollout_rm_scores)
+
+                if self.use_reference_policy:
+                    # compute reference log_prob
+                    with _timer('ref', timing_raw):
+                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(policy_batch)
+                        policy_batch = policy_batch.union(ref_log_prob)
                 
                 # compute values
                 if self.use_critic:
@@ -634,16 +626,39 @@ class RayIRLTrainer(RayPPOTrainer):
                 if self.config.trainer.critic_warmup <= self.global_steps:
                     # update actor
                     with _timer('update_actor', timing_raw):
-                        # actor_output = self.actor_rollout_wg.update_actor(batch)
-                        actor_output = self.actor_rollout_wg.update_actor(policy_batch)
-
-                        
+                        actor_output = self.actor_rollout_wg.update_actor(policy_batch)                        
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
                 
                 # Collect metrics
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'policy_training': metrics}, step=self.global_steps)
+
+                with torch.no_grad():
+                    # rollout again to see if the policy model is improved
+                    # generate policy samples
+                    updated_policy_batch = DataProto.from_single_dict(policy_batch_dict)
+                    updated_gen_batch = updated_policy_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                    updated_gen_batch_output = self.actor_rollout_wg.generate_sequences(updated_gen_batch)
+
+                    # repeat to align with repeated responses in rollout
+                    updated_policy_batch = updated_policy_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    updated_policy_batch = updated_policy_batch.union(updated_gen_batch_output)                    
+                    updated_scores = self.reward_fn.verify(updated_policy_batch)
+                    updated_expert_flags = torch.tensor(updated_scores) > 0.99
+                    updated_policy_batch.batch['labels'] = torch.tensor(updated_scores)
+                    updated_policy_batch.batch['is_expert'] = updated_expert_flags
+
+
+                updated_policy_correct = torch.sum(updated_expert_flags).item()
+                updated_policy_count = len(updated_expert_flags)
+                updated_policy_accuracy = updated_policy_correct / updated_policy_count
+
+
+                logger.log(data={'train_accuracy': {
+                    '/after_update_policy_accuracy': updated_policy_accuracy,
+                    '/policy_accuracy_diff': updated_policy_accuracy - policy_accuracy,
+                }}, step=self.global_steps)
 
                 # Update global step
                 self.global_steps += 1
@@ -658,7 +673,7 @@ class RayIRLTrainer(RayPPOTrainer):
                         best_val_acc = cur_val_acc
                         print(f"Best validation accuracy so far: {best_val_acc}")
                         # Save the best model
-                        # self._save_checkpoint()
+                        self._save_checkpoint(is_best=True)
 
                 # if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
                 #     self._save_checkpoint()

@@ -91,7 +91,6 @@ def main_task(config, compute_score=None):
 
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
-        Role.RefPolicy: ray.remote(ActorRolloutRefWorker),
         Role.Critic: ray.remote(CriticWorker)
     }
 
@@ -102,7 +101,6 @@ def main_task(config, compute_score=None):
 
     mapping = {
         Role.ActorRollout: global_pool_id,
-        Role.RefPolicy: global_pool_id,
         Role.Critic: global_pool_id
     }
 
@@ -110,6 +108,10 @@ def main_task(config, compute_score=None):
         from .irl_fsdp_workers import IRLRewardModelWorker
         role_worker_mapping[Role.RewardModel] = ray.remote(IRLRewardModelWorker)
         mapping[Role.RewardModel] = global_pool_id
+
+    if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+        role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+        mapping[Role.RefPolicy] = global_pool_id
 
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
     if reward_manager_name == 'naive':
