@@ -76,7 +76,7 @@ class DataParallelMCTSRewardModel:
         # add step_tag before a_texts
         a_texts = [ans.replace("\n\n", " ки\n\n") + ' ки' for ans in a_texts]
 
-        ret = torch.zeros_like(input_ids[:, -response_length:])
+        ret = torch.zeros_like(input_ids[:, -response_length:]).to(torch.float)
 
         for b_idx, (question, output, a_id_row) in enumerate(zip(q_texts, a_texts, a_ids)):
             input_for_prm = f"{question} {output}"
