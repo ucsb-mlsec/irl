@@ -12,8 +12,8 @@ recipe/irl/__pycache__/
 verl/__pycache__/
 verl/models/__pycache__/
 verl/models/transformers/__pycache__/
-verl/experiments/__pycache__/
-verl/experiments/dataset/__pycache__/
+verl/experimental/__pycache__/
+verl/experimental/dataset/__pycache__/
 verl/single_controller/__pycache__/
 verl/single_controller/base/__pycache__/
 verl/single_controller/ray/__pycache__/
