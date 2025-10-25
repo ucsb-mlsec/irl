@@ -70,8 +70,8 @@ algorithm:
   kl_ctrl:
     type: fixed
     kl_coef: 0.000
-  reward_gt_coef: 5
-  reward_dpo_coef: 5
+  reward_gt_coef: 1
+  reward_dpo_coef: 0.05
 
 # trainer related flags, mainly specify how many nodes and GPU per node to use
 trainer:

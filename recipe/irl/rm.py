@@ -37,7 +37,6 @@ class RewardModule(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
-
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         """
         Enables gradient checkpointing for the encoder model only.

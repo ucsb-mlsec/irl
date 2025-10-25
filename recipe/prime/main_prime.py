@@ -81,8 +81,8 @@ def main_task(config, compute_score=None):
     elif config.actor_rollout_ref.actor.strategy == 'megatron':
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
         from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-        from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-        ray_worker_group_cls = NVMegatronRayWorkerGroup
+        from verl.single_controller.ray import RayWorkerGroup
+        ray_worker_group_cls = RayWorkerGroup
 
     else:
         raise NotImplementedError

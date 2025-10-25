@@ -1,5 +1,6 @@
 recipe/sft/__pycache__/
 *log
+*.zip
 verl/utils/reward_score/prime_code/__pycache__/
 checkpoints/
 .idea/
@@ -11,13 +12,13 @@ recipe/irl/__pycache__/
 verl/__pycache__/
 verl/models/__pycache__/
 verl/models/transformers/__pycache__/
+verl/experiments/__pycache__/
+verl/experiments/dataset/__pycache__/
 verl/single_controller/__pycache__/
 verl/single_controller/base/__pycache__/
-verl/single_controller/base/register_center/__pycache__/
 verl/single_controller/ray/__pycache__/
 verl/third_party/__pycache__/
 verl/third_party/vllm/__pycache__/
-verl/third_party/vllm/vllm_v_0_6_3/__pycache__/
 verl/trainer/__pycache__/
 verl/trainer/ppo/__pycache__/
 verl/utils/__pycache__/
@@ -29,7 +30,9 @@ verl/utils/reward_score/__pycache__/
 verl/utils/reward_score/prime_math/__pycache__/
 verl/workers/__pycache__/
 verl/workers/actor/__pycache__/
+verl/workers/config/__pycache__/
 verl/workers/critic/__pycache__/
+verl/workers/engine/__pycache__/
 verl/workers/reward_manager/__pycache__/
 verl/workers/reward_model/__pycache__/
 verl/workers/rollout/__pycache__/

@@ -1,19 +1,8 @@
 set -x
 
-export VLLM_ATTENTION_BACKEND=XFORMERS
-
-export WANDB_API_KEY='9ebc02f80e854f13a459e06326b22c04d98bfcb0'
+export WANDB_API_KEY='c2fef355c334fecafdb3d2d32f0e8c07b8349538'
 
 policy_val_path=$HOME/irl/data/validation.parquet
-
-# train_path=$HOME/irl/data/s1k_train_filter.parquet
-# demo_path=$HOME/irl/data/claude_s1k_demo_filter.parquet
-
-# train_path=$HOME/irl/data/prime_correct_only_train.parquet
-# demo_path=$HOME/irl/data/prime_correct_only_expert_demo.parquet
-
-# train_path=$HOME/irl/data/prime_train.parquet
-# demo_path=$HOME/irl/data/prime_expert_demo.parquet
 
 train_path=$HOME/irl/data/prime_train.parquet
 demo_path=$HOME/irl/data/prime_expert_demo.parquet
@@ -22,24 +11,27 @@ train_files="['$train_path']"
 expert_files="['$demo_path']"
 test_files="['$policy_val_path']"
 
-model_path=Qwen/Qwen2.5-3B-Instruct
+ENTROPY_COEFF=0.001
 
-# Qwen/Qwen2.5-Math-7B-Instruct
+model_path=Qwen/Qwen3-4B
+reward_model_path=Qwen/Qwen3-4B
+exp_name=Qwen3-4B-IRL-entropy${ENTROPY_COEFF}
 
-python3 -m recipe.irl.main_irl \
+nohup python3 -m recipe.irl.main_irl \
     data.policy_train_files="$train_files" \
     data.expert_demo_files="$expert_files" \
     data.policy_val_files="$test_files" \
+    data.shuffle=True \
     data.train_batch_size=128 \
     data.val_batch_size=6312 \
     data.max_prompt_length=1536 \
-    data.max_response_length=6144 \
+    data.max_response_length=3100 \
     data.filter_overlong_prompts=False \
     data.filter_accuracy=True \
     data.accuracy_lower_bound=0.2 \
     data.accuracy_upper_bound=0.8 \
     actor_rollout_ref.model.path=$model_path \
-    actor_rollout_ref.actor.optim.lr=5e-7 \
+    actor_rollout_ref.actor.optim.lr=1e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -47,6 +39,9 @@ python3 -m recipe.irl.main_irl \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.entropy_coeff=$ENTROPY_COEFF \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
@@ -54,11 +49,18 @@ python3 -m recipe.irl.main_irl \
     actor_rollout_ref.actor.ppo_epochs=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
+    critic.optim.lr=5e-6 \
+    critic.model.use_remove_padding=True \
+    critic.model.path=Qwen/Qwen3_4B \
+    critic.model.enable_gradient_checkpointing=True \
+    critic.ppo_micro_batch_size_per_gpu=1 \
+    critic.model.fsdp_config.param_offload=True \
+    critic.model.fsdp_config.optimizer_offload=True \
     algorithm.adv_estimator=rloo \
-    algorithm.use_kl_in_reward=True \
+    algorithm.use_kl_in_reward=False \
     algorithm.kl_penalty=kl \
-    algorithm.kl_ctrl.kl_coef=0.1 \
-    reward_model.model.path=$model_path \
+    algorithm.kl_ctrl.kl_coef=0.001 \
+    reward_model.model.path=$reward_model_path \
     reward_model.model.use_remove_padding=False \
     reward_model.mini_batch_size=32 \
     reward_model.micro_batch_size_per_gpu=1 \
@@ -68,13 +70,17 @@ python3 -m recipe.irl.main_irl \
     reward_model.model.optim.grad_clip=10.0 \
     reward_model.model.input_tokenizer=null \
     trainer.val_before_train=True \
+    trainer.resume_mode="disable" \
+    trainer.resume_from_path="/scr/xian/our_math_only_prm/global_step_100" \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='irl' \
-    trainer.experiment_name='Qwen2.5-3B_bs128_ppo1_rm_remove_sigmoid_lr3e-8_reorder_bugfix_filter_acc' \
-    trainer.n_gpus_per_node=2 \
+    trainer.project_name='post_iclr_irl' \
+    trainer.experiment_name=$exp_name \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=4 \
-    trainer.test_freq=1 \
-    trainer.total_epochs=10 $@ > Qwen2.5-3B_bs128_ppo1_rm_remove_sigmoid_lr3e-8_reorder_bugfix_filter_acc.log
-
-    # trainer.total_epochs=10 $@ > output_qwen3b_bs64.log
+    trainer.critic_warmup=0 \
+    trainer.save_freq=-1 \
+    trainer.test_freq=5 \
+    trainer.max_ckpt_to_keep=1 \
+    trainer.default_local_dir="/scr/xian/Qwen3_4B"\
+    trainer.total_epochs=2 \
+    > ./logs/${exp_name}.log 2>&1 &
