@@ -51,11 +51,11 @@ def run_irl(config, compute_score=None):
             }},
         )
 
-    # ray.get(main_task.remote(config, compute_score))
-    main_task(config, compute_score)
+    ray.get(main_task.remote(config, compute_score))
+    # main_task(config, compute_score)
 
 
-# @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
+@ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 def main_task(config, compute_score=None):
     from verl.utils.fs import copy_local_path_from_hdfs
     # print initial config
@@ -81,8 +81,8 @@ def main_task(config, compute_score=None):
     elif config.actor_rollout_ref.actor.strategy == 'megatron':
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
         from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-        from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-        ray_worker_group_cls = NVMegatronRayWorkerGroup
+        from verl.single_controller.ray import RayWorkerGroup
+        ray_worker_group_cls = RayWorkerGroup
 
     else:
         raise NotImplementedError

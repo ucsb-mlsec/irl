@@ -21,6 +21,7 @@ verl/third_party/__pycache__/
 verl/third_party/vllm/__pycache__/
 verl/trainer/__pycache__/
 verl/trainer/ppo/__pycache__/
+verl/trainer/config/__pycache__/
 verl/utils/__pycache__/
 verl/utils/checkpoint/__pycache__/
 verl/utils/dataset/__pycache__/

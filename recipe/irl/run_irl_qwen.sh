@@ -31,7 +31,7 @@ nohup python3 -m recipe.irl.main_irl \
     data.accuracy_lower_bound=0.2 \
     data.accuracy_upper_bound=0.8 \
     actor_rollout_ref.model.path=$model_path \
-    actor_rollout_ref.actor.optim.lr=1e-7 \
+    actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
