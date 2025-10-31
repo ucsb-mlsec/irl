@@ -37,6 +37,7 @@ from verl.trainer.ppo.metric_utils import _compute_response_info
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.profiler.performance import simple_timer
+from verl.trainer.ppo.core_algos import agg_loss
 
 from .dataset import IRLDataset, collate_fn
 from . import irl_core_algos
@@ -593,6 +594,17 @@ class RayIRLTrainer(RayPPOTrainer):
                 policy_batch = policy_batch.union(policy_rollout_rm_scores)
 
                 policy_batch.batch['response_mask'] = compute_response_mask(policy_batch)
+
+                # log entropy information
+                entropys = policy_batch.batch["entropys"]
+                response_masks = policy_batch.batch["response_mask"]
+                loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                metrics.update(old_log_prob_metrics)
+                policy_batch.batch.pop("entropys")
+
+
                 if self.use_reference_policy:
                     # compute reference log_prob
                     with simple_timer('ref', timing_raw):
