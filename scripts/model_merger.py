@@ -24,7 +24,7 @@ from safetensors.torch import load_file
 from verl.utils import hf_tokenizer
 
 # Running script:
-#   python scripts/model_merger.py     --backend fsdp     --hf_model_path Qwen/Qwen2.5-3B-Instruct     --local_dir /scr/xian/rloo/best_model/actor     --target_dir /scr/xian/rloo/final_model
+#   python -m scripts.model_merger --backend fsdp --hf_model_path Qwen/Qwen2.5-7B-Instruct --local_dir /scr/xian/Qwen2.5_7B/pl_5e-7_rl_1e-8/best_model/actor --target_dir /scr/xian/Qwen2.5_7B/pl_5e-7_rl_1e-8/model
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', type = str, required=True, help="The backend of the model")
 parser.add_argument('--tie-word-embedding', action='store_true', help="Whether to tie word embedding weights")
