@@ -9,6 +9,10 @@ __MACOSX/
 data/
 outputs/
 recipe/irl/__pycache__/
+eval/utils/__pycache__/
+eval/Math/Qwen25-Math/evaluation/__pycache__/
+eval/Math/Qwen25-Math/results/
+eval/results/
 verl/__pycache__/
 verl/models/__pycache__/
 verl/models/transformers/__pycache__/
