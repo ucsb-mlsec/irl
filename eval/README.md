@@ -14,6 +14,7 @@ cd eval
 conda create -n prime python==3.10
 conda activate prime
 pip install -r requirements_prime.txt
+pip install flash-attn==2.8.3
 ```
 
 For Minerva Math and OlympiadBench, we use the following virtual environment.
@@ -24,6 +25,7 @@ For Minerva Math and OlympiadBench, we use the following virtual environment.
 conda create -n qwen_math python==3.10
 conda activate qwen_math
 pip install -r requirements_qwen_math.txt
+pip install flash-attn==2.8.3
 ```
 
 For LiveCodeBench, we use the following virtual environment.
@@ -34,6 +36,7 @@ For LiveCodeBench, we use the following virtual environment.
 conda create -n lcb python==3.10
 conda activate lcb
 pip install -r requirements_lcb.txt
+pip install flash-attn==2.8.3
 ```
 
 ### Eval
