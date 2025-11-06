@@ -46,7 +46,6 @@ def generate_sample_batch(question_list):
     llm = LLM(
         model=args.model,
         trust_remote_code=True,
-        tensor_parallel_size=torch.cuda.device_count(),
         gpu_memory_utilization=0.90,
         dtype='bfloat16',
         enforce_eager=True,
