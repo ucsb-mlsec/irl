@@ -31,8 +31,8 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
 from verl import DataProto
 from verl.single_controller.ray import RayWorkerGroup
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.ray_trainer import Role, WorkerType, ResourcePoolManager, reduce_metrics, _timer
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, compute_response_mask
+from verl.trainer.ppo.ray_trainer import Role, WorkerType, ResourcePoolManager, reduce_metrics
 from verl.trainer.ppo.metric_utils import _compute_response_info
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -40,6 +40,7 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from .dataset import IRLDataset, collate_fn
 from . import mcts_core_algos
 from .utils import cal_outcome_reward
+from verl.utils.profiler.performance import simple_timer as _timer
 
 
 def compute_advantage(data: DataProto, adv_estimator, config):
@@ -146,7 +147,7 @@ class RayMCTSTrainer(RayPPOTrainer):
         # TODO: Additional config checks can be added here
         config = self.config
 
-    def _create_dataloader(self):
+    def _create_dataloader(self, *args, **kwargs):
         from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
         # building the policy train dataset
         self.policy_train_dataset = IRLDataset(
@@ -164,7 +165,9 @@ class RayMCTSTrainer(RayPPOTrainer):
         if self.config.data.shuffle:
             print("Using random sampler for policy train dataset")
             train_dataloader_generator = torch.Generator()
-            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+            seed = self.config.data.get('seed')
+            if seed is not None:
+                train_dataloader_generator.manual_seed(seed)
             sampler = RandomSampler(data_source=self.policy_train_dataset, generator=train_dataloader_generator)
         else:
             sampler = SequentialSampler(data_source=self.policy_train_dataset)
@@ -190,33 +193,16 @@ class RayMCTSTrainer(RayPPOTrainer):
             filter_overlong_prompts=self.config.data.get('filter_overlong_prompts', False)
         )
 
-        if self.config.data.shuffle:
-            print("Using random sampler for expert demo dataset")
-            expert_demo_dataloader_generator = torch.Generator()
-            expert_demo_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
-            sampler = RandomSampler(data_source=self.expert_demo_dataset, generator=expert_demo_dataloader_generator)
-        else:
-            sampler = SequentialSampler(data_source=self.expert_demo_dataset)
-
         self.expert_demo_dataloader = DataLoader(
             dataset=self.expert_demo_dataset, 
             batch_size=int(self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n), 
             drop_last=True, 
             collate_fn=collate_fn
         )
-
         # building the val dataset
-        self.policy_val_dataset = RLHFDataset(
-            parquet_files=self.config.data.policy_val_files,
-            tokenizer=self.tokenizer,
-            prompt_key=self.config.data.prompt_key,
-            max_prompt_length=self.config.data.max_prompt_length,
-            filter_prompts=True,
-            return_raw_chat=self.config.data.get('return_raw_chat', False),
-            truncation='error',
-            filter_overlong_prompts=self.config.data.get('filter_overlong_prompts', False)
-        )
-        
+        self.policy_val_dataset = RLHFDataset(data_files=self.config.data.policy_val_files,
+                                              tokenizer=self.tokenizer,
+                                              config=self.config.data)
         self.val_dataloader = DataLoader(
             dataset=self.policy_val_dataset,
             batch_size=len(self.policy_val_dataset),
@@ -473,7 +459,8 @@ class RayMCTSTrainer(RayPPOTrainer):
                     policy_batch = DataProto.from_single_dict(policy_batch_dict)
                     # pop those keys for generation
                     gen_batch = policy_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
-                    gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                    gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
 
                     policy_batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(policy_batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
@@ -503,6 +490,7 @@ class RayMCTSTrainer(RayPPOTrainer):
 
                 # Step 4: Merge scores back into policy batch
                 policy_batch = policy_batch.union(policy_rollout_rm_scores)
+                policy_batch.batch['response_mask'] = compute_response_mask(policy_batch)
 
                 if self.use_reference_policy:
                     # compute reference log_prob

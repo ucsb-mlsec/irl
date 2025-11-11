@@ -1,7 +1,5 @@
 set -x
 
-export VLLM_ATTENTION_BACKEND=XFORMERS
-
 export WANDB_API_KEY='c2fef355c334fecafdb3d2d32f0e8c07b8349538'
 
 policy_val_path=$HOME/irl/data/validation.parquet
