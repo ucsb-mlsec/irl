@@ -352,13 +352,6 @@ class RayIRLTrainer(RayPPOTrainer):
         if self.use_rm:
             self.rm_wg.load_checkpoint(reward_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
 
-        # load dataloader,
-        # TODO: from remote not implemented yet
-        dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
-        self.policy_train_dataloader = torch.load(dataloader_local_path)
-        if isinstance(self.policy_train_dataloader.dataset, IRLDataset):
-            self.policy_train_dataloader.dataset.resume_dataset_state()
-
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
