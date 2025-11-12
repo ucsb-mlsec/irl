@@ -331,12 +331,6 @@ class RayIRLTrainer(RayPPOTrainer):
                     global_step_folder = os.path.join(working_dir, global_step_folder)
         
         print(f'Load from checkpoint folder: {global_step_folder}')
-        # set global step
-        self.global_steps = int(global_step_folder.split('global_step_')[-1])
-
-        print(f'Setting global step to {self.global_steps}')
-        print(f'Resuming from {global_step_folder}')
-
         actor_path = os.path.join(global_step_folder, 'actor')
         critic_path = os.path.join(global_step_folder, "critic")
         reward_path = os.path.join(global_step_folder, 'reward')
