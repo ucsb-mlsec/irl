@@ -301,12 +301,6 @@ class RayMCTSTrainer(RayPPOTrainer):
                     global_step_folder = os.path.join(working_dir, global_step_folder)
         
         print(f'Load from checkpoint folder: {global_step_folder}')
-        # set global step
-        self.global_steps = int(global_step_folder.split('global_step_')[-1])
-
-        print(f'Setting global step to {self.global_steps}')
-        print(f'Resuming from {global_step_folder}')
-
         actor_path = os.path.join(global_step_folder, 'actor')
         critic_path = os.path.join(global_step_folder, "critic")
         reward_path = os.path.join(global_step_folder, 'reward')
@@ -321,13 +315,6 @@ class RayMCTSTrainer(RayPPOTrainer):
         # load rm
         if self.use_rm:
             self.rm_wg.load_checkpoint(reward_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
-
-        # load dataloader,
-        # TODO: from remote not implemented yet
-        dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
-        self.policy_train_dataloader = torch.load(dataloader_local_path)
-        if isinstance(self.policy_train_dataloader.dataset, IRLDataset):
-            self.policy_train_dataloader.dataset.resume_dataset_state()
 
     def _validate(self):
         data_source_lst = []
