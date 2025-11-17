@@ -312,9 +312,6 @@ class RayMCTSTrainer(RayPPOTrainer):
             self.critic_wg.load_checkpoint(
                 critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
-        # load rm
-        if self.use_rm:
-            self.rm_wg.load_checkpoint(reward_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
 
     def _validate(self):
         data_source_lst = []
