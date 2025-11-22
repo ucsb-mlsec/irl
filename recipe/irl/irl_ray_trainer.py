@@ -658,6 +658,8 @@ class RayIRLTrainer(RayPPOTrainer):
                 
                 if self.global_steps >= self.total_training_steps:
                     return
+        # Final checkpoint at the end of training
+        self._save_checkpoint()
 
     def reward_model_metrics(self, batch, rm_scores):
         # Get policy and expert masks
