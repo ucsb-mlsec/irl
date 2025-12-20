@@ -497,20 +497,21 @@ class RayIRLTrainer(RayPPOTrainer):
                     policy_batch.batch['is_expert'] = expert_flags
                 
                 # # log the prompt and response samples
-                # text_table = wandb.Table(columns=["Question", "Response"])
-                # batch_len = len(policy_batch)
-                # num_log_samples = min(5, batch_len)
-                # random_indices = random.sample(range(batch_len), num_log_samples)
-                # for i in random_indices:
-                #     input_text = self.tokenizer.decode(
-                #         policy_batch.batch['input_ids'][i][:self.config.data.max_prompt_length], skip_special_tokens=True
-                #     )
-                #     response_text = self.tokenizer.decode(
-                #         policy_batch.batch['responses'][i], skip_special_tokens=True
-                #     )
-                    
-                #     text_table.add_data(input_text, response_text)
-                # logger.log(data={"sample/generations": text_table}, step=self.global_steps)
+                if self.global_steps % self.config.trainer.test_freq == 0:
+                    text_table = wandb.Table(columns=["question", "response"])
+                    batch_len = len(policy_batch)
+                    num_log_samples = min(5, batch_len)
+                    random_indices = random.sample(range(batch_len), num_log_samples)
+                    for i in random_indices:
+                        input_text = self.tokenizer.decode(
+                            policy_batch.batch['input_ids'][i][:self.config.data.max_prompt_length], skip_special_tokens=True
+                        )
+                        response_text = self.tokenizer.decode(
+                            policy_batch.batch['responses'][i], skip_special_tokens=True
+                        )
+                        
+                        text_table.add_data(input_text, response_text)
+                    logger.log(data={"sample/generations": text_table}, step=self.global_steps)
 
                 filter_reorder_index = self.filter_and_downsample(scores, policy_batch)
                 policy_batch.reorder(filter_reorder_index[:int(len(policy_batch) // 2)])
@@ -568,7 +569,7 @@ class RayIRLTrainer(RayPPOTrainer):
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 logger.log(data={'reward_model_training': metrics}, step=self.global_steps)
 
-                resp_metric = compute_data_metrics(batch=batch)
+                resp_metric = compute_data_metrics(batch=policy_batch)
                 logger.log(data={"Response info": resp_metric}, step=self.global_steps)
 
                 # This was your interleaved index (e.g., [0, 4, 1, 5, 2, 6, 3, 7] for n_samples=4)
