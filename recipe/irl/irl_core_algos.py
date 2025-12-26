@@ -33,11 +33,20 @@ GRPO:
     - Compute Gain first: G_t = \sum_t \gamma^{t} r_t
     - advantage A_t^{k} =  [G_t^{k} - b_t^{k}]/\sigma, b_t^{k} = 1/(K-1) * \sum_{k' \neq k} G_t^{k'}, \sigma = std(G_t)
 """
-def masked_rloo(reward_tensor_original, mask_tensor, n_samples):
+def masked_rloo(reward_tensor_original, mask_tensor, n_samples, gamma=1.0):
 
     reward_tensor = reward_tensor_original.clone() # n_responses (n_samples(n_rollout) * n_inputs) x seq_len
     reward_tensor[~mask_tensor] = 0
-    returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1]) # G_t
+
+    if gamma == 1.0:
+        returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1]) # G_t
+    else:
+        returns = torch.zeros_like(reward_tensors)
+        running_return = 0
+        for t in reversed(range(reward_tensor.size(1))):
+            running_return = reward_tensor[:, t] + gamma * running_return
+            returns[:, t] = running_return
+
     all_adjusted_returns = []
 
     for i in range(0, returns.shape[0], n_samples):
@@ -69,7 +78,7 @@ def masked_rloo(reward_tensor_original, mask_tensor, n_samples):
 
     return final_returns
 
-def masked_grpo(reward_tensor_original, mask_tensor, n_samples):
+def masked_grpo(reward_tensor_original, mask_tensor, n_samples, gamma=1.0):
 
     def masked_std(x, mask, eps=1e-6):
         mask = mask.float()
@@ -85,7 +94,16 @@ def masked_grpo(reward_tensor_original, mask_tensor, n_samples):
 
     reward_tensor = reward_tensor_original.clone()
     reward_tensor[~mask_tensor] = 0
-    returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+    
+    if gamma == 1.0:
+        returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1]) # G_t
+    else:
+        returns = torch.zeros_like(reward_tensors)
+        running_return = 0
+        for t in reversed(range(reward_tensor.size(1))):
+            running_return = reward_tensor[:, t] + gamma * running_return
+            returns[:, t] = running_return
+
     all_adjusted_returns = []
 
     for i in range(0, returns.shape[0], n_samples):
@@ -186,7 +204,7 @@ def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, 
                 reward_tensor[~reward_mask] = 0.0
                 reverse_cumsum = torch.cumsum(reward_tensor.flip(dims=[1]),dim=-1).flip(dims=[1])
                 reward_tensor = reward_tensor/(reverse_cumsum.abs().max()+1e-6)
-                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples) * config.algorithm.reward_dpo_coef)
+                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples, gamma=1.0) * config.algorithm.reward_dpo_coef)
             
             if 'labels' in data.batch.keys() and config.algorithm.reward_gt_coef != 0.:
                 reward_tensor = torch.zeros_like(response_mask, dtype=torch.float32)
@@ -195,13 +213,9 @@ def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, 
                 reward_tensor[
                     torch.arange(0, valid_response_length.shape[0], dtype=torch.long, device=valid_response_length.device),
                     valid_response_length - 1] = data.batch['labels']
-                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples) * config.algorithm.reward_gt_coef)
+                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples, gamma=1.0) * config.algorithm.reward_gt_coef)
 
             advantages = sum(reward_tensors)
             advantages = verl_F.masked_whiten(advantages, response_mask)
 
             return advantages, advantages
-
-
-
-
