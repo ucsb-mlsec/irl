@@ -41,7 +41,7 @@ def masked_rloo(reward_tensor_original, mask_tensor, n_samples, gamma=1.0):
     if gamma == 1.0:
         returns = reward_tensor.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1]) # G_t
     else:
-        returns = torch.zeros_like(reward_tensors)
+        returns = torch.zeros_like(reward_tensor)
         running_return = 0
         for t in reversed(range(reward_tensor.size(1))):
             running_return = reward_tensor[:, t] + gamma * running_return
