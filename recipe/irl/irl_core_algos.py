@@ -204,7 +204,7 @@ def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, 
                 reward_tensor[~reward_mask] = 0.0
                 reverse_cumsum = torch.cumsum(reward_tensor.flip(dims=[1]),dim=-1).flip(dims=[1])
                 reward_tensor = reward_tensor/(reverse_cumsum.abs().max()+1e-6)
-                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples, gamma=1.0) * config.algorithm.reward_dpo_coef)
+                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples, gamma=0.95) * config.algorithm.reward_dpo_coef)
             
             if 'labels' in data.batch.keys() and config.algorithm.reward_gt_coef != 0.:
                 reward_tensor = torch.zeros_like(response_mask, dtype=torch.float32)
@@ -213,7 +213,7 @@ def compute_advantage_return(data: verl.DataProto, response_mask: torch.Tensor, 
                 reward_tensor[
                     torch.arange(0, valid_response_length.shape[0], dtype=torch.long, device=valid_response_length.device),
                     valid_response_length - 1] = data.batch['labels']
-                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples, gamma=1.0) * config.algorithm.reward_gt_coef)
+                reward_tensors.append(masked_adv(reward_tensor, reward_mask, n_samples, gamma=0.95) * config.algorithm.reward_gt_coef)
 
             advantages = sum(reward_tensors)
             advantages = verl_F.masked_whiten(advantages, response_mask)
