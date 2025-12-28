@@ -11,6 +11,7 @@ import json
 from tqdm import tqdm
 import pandas as pd
 from utils.util import clean_numbers, last_boxed_only, last_boxed_only_string
+from recipe.irl.rm import RewardModule
 from utils.math_equivalence import is_equiv
 from utils.grader import math_equal
 from collections import defaultdict
@@ -38,18 +39,85 @@ def write_jsonl_file(file_path, data):
             f.write(json.dumps(line, ensure_ascii=False) + '\n')
 
 
-def generate_sample_batch(question_list):
+def get_rm_score(question, answer):
+    system_prompt = open("system_prompt.md").read()
+    content = question + "\n\nPresent the answer in LaTex format: \\boxed{Your answer}"
+    msg = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content},
+        {"role": "assistant", "content": answer},
+    ]
+    msg_context = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content},
+    ]
+    # Format and tokenize the conversations
+    model_device = next(rm.parameters()).device
+    msg_formatted = rm_tokenizer.apply_chat_template(msg, tokenize=False)
+    msg_tokenized = rm_tokenizer(msg_formatted, return_tensors="pt").to(model_device)
+    # Get start index of the answer generation
+    context_formatted = rm_tokenizer.apply_chat_template(msg_context, tokenize=False, add_generation_prompt=True)
+    context_tokenized = rm_tokenizer(context_formatted, return_tensors="pt")
+    start_index = context_tokenized.input_ids.shape[1]
+    # Get the reward scores
+    with torch.no_grad():
+        score = rm(**msg_tokenized)
+    # Do average pooling over the response tokens
+    response_score = score[0, start_index:].mean().item()
+    return response_score
+
+def generate_sample_batch(question_list, temperature=0.0, n=1):
     llm = LLM(
         model=args.model,
         trust_remote_code=True,
         gpu_memory_utilization=0.90,
     )
     sampling_params = SamplingParams(max_tokens=8192,
-                                    temperature=0,
+                                    temperature=temperature,
+                                    n=n,
                                     stop=["\n###\nProblem: ", "<|eot_id|>"],)
     outputs = llm.generate(question_list, sampling_params, use_tqdm=True)
     completions = [output.outputs[0].text for output in outputs]
-    return completions
+    if n == 1:
+        return completions
+    else:
+        all_completions = []
+        for output in outputs:
+            question_completions = [completion.text for completion in output.outputs]
+            all_completions.append(question_completions)
+        
+        tts_completions = []
+        for i, question in enumerate(question_list):
+            group = {}
+            # best_of_n_max_score = -1
+            # best_of_n = None
+            for pred in all_completions[i]:
+                # first parse the answer for this prediction
+                is_matched, model_output = match_answer(pred)
+                pred_choice = model_output.strip("The final answer is ").strip(". I hope it is correct.")
+                # the group is a dictionary that is used to do self-consistency
+                if pred_choice not in group:
+                    group[pred_choice] = []
+
+                score = get_rm_score(question, pred)
+
+                group[pred_choice].append((score, pred))
+
+            self_consistent_max_score = float("-inf")
+            self_consistent = None
+            for _, scores in group.items():
+                cur_score = sum(score for score, _ in scores)
+                if cur_score > self_consistent_max_score:
+                    self_consistent_max_score = cur_score
+                    single_max_score = float("-inf")
+                    for score, pred in scores:
+                        if score > single_max_score:
+                            single_max_score = score
+                            self_consistent = pred
+            
+            tts_completions.append(self_consistent)
+            # tts_completions.append(best_of_n)
+        return tts_completions
 
 
 def remove_boxed(s):
@@ -163,11 +231,18 @@ def run(args, max=-1):
     correct = 0
     total = 0
 
-    
+
+    if args.test_time_scaling:
+        # load reward model
+        global rm
+        global rm_tokenizer
+        rm = RewardModule.from_pretrained(args.reward_model)
+        rm_tokenizer = AutoTokenizer.from_pretrained('Qwen3-4B-Base') # hardcoded for now
+        
     all_problems = pd.read_json(os.path.join(args.data_dir, "math_test_cleaned.json")).to_dict(orient="records")
     print("reading problems done!")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    completions = generate_sample_batch([make_conv_hf(problem_data["problem"], tokenizer) for problem_data in all_problems])
+    completions = generate_sample_batch([make_conv_hf(problem_data["problem"], tokenizer) for problem_data in all_problems], args.temperature, args.n)
 
     tmp_data = []
     for problem_data, model_output in zip(all_problems, completions):
@@ -321,5 +396,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", "-d", type=str, default="")
     parser.add_argument("--save_dir", "-s", type=str, default="")
     parser.add_argument("--model", type=str, default="")
+    # test time scaling options
+    parser.add_argument("--test_time_scaling", type=bool, default=False)
+    parser.add_argument("--reward_model", type=str, default="")
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--n", type=int, default=1)
     args = parser.parse_args()
     run(args)
