@@ -21,6 +21,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClas
 from concurrent.futures import ThreadPoolExecutor
 from torch.distributed._tensor import DTensor, Shard, Placement
 from safetensors.torch import load_file
+from recipe.irl.rm import RewardModule
 from verl.utils import hf_tokenizer
 
 # Running script:
@@ -35,6 +36,8 @@ parser.add_argument('--target_dir', required=False, default="tmp", type = str, h
 parser.add_argument("--hf_upload_path", default=False, type = str, help="The path of the huggingface repo to upload")
 parser.add_argument("--test", action="store_true", help="test correctness of hf_model")
 parser.add_argument("--test_hf_dir", type = str, required=False, help="test correctness of hf_model, , with hf_model in checkpoint.contents")
+# add a indicator for reward model
+parser.add_argument('--is_reward_model', default=False, help="Whether the model is a reward model")
 args = parser.parse_args()
 os.makedirs(args.target_dir, exist_ok=True)
 if args.test:
@@ -162,26 +165,34 @@ def convert_fsdp_checkpoints_to_hfmodels():
     else:
         hf_path = args.target_dir
     config = AutoConfig.from_pretrained(args.hf_model_path)
-
-    if 'ForTokenClassification' in config.architectures[0]:
-        auto_model = AutoModelForTokenClassification
-    elif 'ForCausalLM' in config.architectures[0]:
-        auto_model = AutoModelForCausalLM
-    elif 'ForConditionalGeneration' in config.architectures[0]:
-        auto_model = AutoModelForVision2Seq
+    # special handling for reward model
+    if args.is_reward_model:
+        config.num_labels = 1
+        setattr(config, 'classifier_dropout', 0.)
+        setattr(config, 'hidden_dropout', '0')
+        model = RewardModule(
+            base_model=args.hf_model_path,
+            torch_dtype=torch.bfloat16,
+            config=config,
+            trust_remote_code=False,
+        )
     else:
-        raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
-
-    with torch.device('meta'):
-        model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
+        if 'ForTokenClassification' in config.architectures[0]:
+            auto_model = AutoModelForTokenClassification
+        elif 'ForCausalLM' in config.architectures[0]:
+            auto_model = AutoModelForCausalLM
+        elif 'ForConditionalGeneration' in config.architectures[0]:
+            auto_model = AutoModelForVision2Seq
+        else:
+            raise NotImplementedError(f'Unknown architecture {config["architectures"]}')
+        with torch.device('meta'):
+            model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
     model.to_empty(device='cpu')
 
     print(f'Saving model to {hf_path}')
     model.save_pretrained(hf_path, state_dict=state_dict)
     tokenizer = hf_tokenizer(args.hf_model_path)
     tokenizer.save_pretrained(hf_path)
-
-
 
     del state_dict
     del model

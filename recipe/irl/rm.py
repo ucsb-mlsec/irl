@@ -1,21 +1,19 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import PreTrainedModel, AutoTokenizer, AutoModelForCausalLM
 
 
-class RewardModule(nn.Module):
+class RewardModule(PreTrainedModel):
     def __init__(self, base_model, torch_dtype, config, trust_remote_code, ffn_only=False, ffn_hidden_size=1024, device="cuda"):
-        super().__init__()
-        self.device = device
+        super().__init__(config)
+        self.device_map = device
         
         self.encoder = AutoModelForCausalLM.from_pretrained(base_model,
                                                             torch_dtype=torch_dtype,
                                                             config=config,
                                                             attn_implementation='flash_attention_2',
                                                             trust_remote_code=trust_remote_code)
-        
-        self.config = config
         
         self.tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=trust_remote_code)
         self.input_size = self.config.hidden_size
@@ -29,7 +27,6 @@ class RewardModule(nn.Module):
             nn.ReLU(),
             nn.Linear(self.ffn_hidden_size, 1),
             nn.Tanh()
-            # nn.Sigmoid()
         )
 
         if ffn_only:
@@ -52,10 +49,15 @@ class RewardModule(nn.Module):
         if hasattr(self.encoder, 'gradient_checkpointing_enable'):
             self.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
         
-        # Set a flag to track that gradient checkpointing is enabled
-        self.is_gradient_checkpointing = True
+        self.gradient_checkpointing = True
+        
+        # 3. Standard HF practice: Disable caching when checkpointing is on
+        # (Gradient checkpointing is incompatible with use_cache)
+        if hasattr(self, "config"):
+            self.config.use_cache = False
+        
 
-    def __call__(self, input_ids, attention_mask=None, position_ids=None, use_cache=False):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, use_cache=False):
         """
         Process inputs through the model and calculate rewards.
         
