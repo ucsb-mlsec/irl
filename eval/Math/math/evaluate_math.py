@@ -399,7 +399,7 @@ if __name__ == "__main__":
     # test time scaling options
     parser.add_argument("--test_time_scaling", type=bool, default=False)
     parser.add_argument("--reward_model", type=str, default="")
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--n", type=int, default=1)
     args = parser.parse_args()
     run(args)
