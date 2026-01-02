@@ -1,11 +1,10 @@
-import torch
-from torch import nn
-import torch.nn.functional as F
-from transformers import PreTrainedModel, AutoTokenizer, AutoModelForCausalLM
+from transformers import PreTrainedModel, AutoModelForCausalLM, AutoTokenizer, AutoConfig
+import torch.nn as nn
 
 
 class RewardModule(PreTrainedModel):
-    def __init__(self, base_model, torch_dtype, config, trust_remote_code, ffn_only=False, ffn_hidden_size=1024, device="cuda"):
+    config_class = AutoConfig
+    def __init__(self, config, base_model=None, torch_dtype=None, trust_remote_code=False, ffn_only=False, ffn_hidden_size=1024, device="cuda"):
         super().__init__(config)
         self.device_map = device
         
@@ -14,7 +13,7 @@ class RewardModule(PreTrainedModel):
                                                             config=config,
                                                             attn_implementation='flash_attention_2',
                                                             trust_remote_code=trust_remote_code)
-        
+        print('Loaded base model for RewardModule:', base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=trust_remote_code)
         self.input_size = self.config.hidden_size
         self.ffn_hidden_size = ffn_hidden_size

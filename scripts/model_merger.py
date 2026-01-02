@@ -25,7 +25,7 @@ from recipe.irl.rm import RewardModule
 from verl.utils import hf_tokenizer
 
 # Running script:
-#   python -m scripts.model_merger --backend fsdp --hf_model_path Qwen/Qwen2.5-7B-Instruct --local_dir /scr/xian/Qwen2.5_7B/pl_5e-7_rl_1e-8/best_model/actor --target_dir /scr/xian/Qwen2.5_7B/pl_5e-7_rl_1e-8/model
+#   python -m scripts.model_merger --backend fsdp --hf_model_path Qwen/Qwen3-4B-Base --local_dir /scr/xian/IRL_Qwen3_4B_Base/global_step_75/reward --target_dir /scr/xian/IRL_Qwen3_4B_Base/global_step_75/tmp --is_reward_model True
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', type = str, required=True, help="The backend of the model")
 parser.add_argument('--tie-word-embedding', action='store_true', help="Whether to tie word embedding weights")
@@ -171,9 +171,9 @@ def convert_fsdp_checkpoints_to_hfmodels():
         setattr(config, 'classifier_dropout', 0.)
         setattr(config, 'hidden_dropout', '0')
         model = RewardModule(
+            config=config,
             base_model=args.hf_model_path,
             torch_dtype=torch.bfloat16,
-            config=config,
             trust_remote_code=False,
         )
     else:
@@ -188,8 +188,8 @@ def convert_fsdp_checkpoints_to_hfmodels():
         with torch.device('meta'):
             model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
     model.to_empty(device='cpu')
-
     print(f'Saving model to {hf_path}')
+    import pdb; pdb.set_trace()
     model.save_pretrained(hf_path, state_dict=state_dict)
     tokenizer = hf_tokenizer(args.hf_model_path)
     tokenizer.save_pretrained(hf_path)

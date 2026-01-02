@@ -11,7 +11,6 @@ import json
 from tqdm import tqdm
 import pandas as pd
 from utils.util import clean_numbers, last_boxed_only, last_boxed_only_string
-from recipe.irl.rm import RewardModule
 from utils.math_equivalence import is_equiv
 from utils.grader import math_equal
 from collections import defaultdict
@@ -20,6 +19,9 @@ import torch
 import re
 import math
 from transformers import AutoTokenizer
+# add recipe path
+sys.path.append(os.path.abspath(".."))
+from recipe.irl.rm import RewardModule
 
 os.environ["NCCL_IGNORE_DISABLED_P2P"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -106,7 +108,7 @@ def generate_sample_batch(question_list, temperature=0.0, n=1):
             self_consistent_max_score = float("-inf")
             self_consistent = None
             for _, scores in group.items():
-                cur_score = sum(score for score, _ in scores)
+                cur_score = np.mean([score for score, _ in scores])
                 if cur_score > self_consistent_max_score:
                     self_consistent_max_score = cur_score
                     single_max_score = float("-inf")
@@ -236,8 +238,14 @@ def run(args, max=-1):
         # load reward model
         global rm
         global rm_tokenizer
-        rm = RewardModule.from_pretrained(args.reward_model)
-        rm_tokenizer = AutoTokenizer.from_pretrained('Qwen3-4B-Base') # hardcoded for now
+        rm = RewardModule.from_pretrained(
+            args.reward_model, 
+            base_model='Qwen/Qwen3-4B-Base',
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            device_map="auto",
+        )
+        rm_tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-4B-Base') # hardcoded for now
         
     all_problems = pd.read_json(os.path.join(args.data_dir, "math_test_cleaned.json")).to_dict(orient="records")
     print("reading problems done!")
@@ -397,9 +405,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", "-s", type=str, default="")
     parser.add_argument("--model", type=str, default="")
     # test time scaling options
-    parser.add_argument("--test_time_scaling", type=bool, default=False)
-    parser.add_argument("--reward_model", type=str, default="")
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument("--test_time_scaling", type=bool, default=True)
+    parser.add_argument("--reward_model", type=str, default="/scr/xian/IRL_Qwen3_4B_Base/global_step_75/reward_model")
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--n", type=int, default=4)
     args = parser.parse_args()
     run(args)

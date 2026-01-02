@@ -112,9 +112,9 @@ class IRLRewardModelWorker(Worker):
             setattr(reward_model_config, 'hidden_dropout', '0')
 
             reward_module = RewardModule(
+                config=reward_model_config,
                 base_model=local_path,
                 torch_dtype=torch_dtype,
-                config=reward_model_config,
                 trust_remote_code=trust_remote_code,
             )
             
