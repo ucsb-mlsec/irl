@@ -13,7 +13,6 @@ class RewardModule(PreTrainedModel):
                                                             config=config,
                                                             attn_implementation='flash_attention_2',
                                                             trust_remote_code=trust_remote_code)
-        print('Loaded base model for RewardModule:', base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=trust_remote_code)
         self.input_size = self.config.hidden_size
         self.ffn_hidden_size = ffn_hidden_size

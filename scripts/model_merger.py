@@ -189,7 +189,7 @@ def convert_fsdp_checkpoints_to_hfmodels():
             model = auto_model.from_config(config, torch_dtype=torch.bfloat16)
     model.to_empty(device='cpu')
     print(f'Saving model to {hf_path}')
-    import pdb; pdb.set_trace()
+    
     model.save_pretrained(hf_path, state_dict=state_dict)
     tokenizer = hf_tokenizer(args.hf_model_path)
     tokenizer.save_pretrained(hf_path)
