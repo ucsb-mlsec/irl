@@ -42,15 +42,12 @@ def write_jsonl_file(file_path, data):
 
 
 def get_rm_score(question, answer):
-    system_prompt = open("system_prompt.md").read()
     content = question + "\n\nPresent the answer in LaTex format: \\boxed{Your answer}"
     msg = [
-        {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
         {"role": "assistant", "content": answer},
     ]
     msg_context = [
-        {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
     ]
     # Format and tokenize the conversations
@@ -68,7 +65,7 @@ def get_rm_score(question, answer):
     response_score = score[0, start_index:].mean().item()
     return response_score
 
-def generate_sample_batch(question_list, temperature=0.0, n=1):
+def generate_sample_batch(question_list, raw_question_list, temperature=0.0, n=1):
     llm = LLM(
         model=args.model,
         trust_remote_code=True,
@@ -89,7 +86,7 @@ def generate_sample_batch(question_list, temperature=0.0, n=1):
             all_completions.append(question_completions)
         
         tts_completions = []
-        for i, question in enumerate(question_list):
+        for i, question in enumerate(raw_question_list):
             group = {}
             # best_of_n_max_score = -1
             # best_of_n = None
@@ -250,7 +247,8 @@ def run(args, max=-1):
     all_problems = pd.read_json(os.path.join(args.data_dir, "math_test_cleaned.json")).to_dict(orient="records")
     print("reading problems done!")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    completions = generate_sample_batch([make_conv_hf(problem_data["problem"], tokenizer) for problem_data in all_problems], args.temperature, args.n)
+    completions = generate_sample_batch([make_conv_hf(problem_data["question"], tokenizer) for problem_data in all_problems], \
+        [problem_data["question"] for problem_data in all_problems], args.temperature, args.n)
 
     tmp_data = []
     for problem_data, model_output in zip(all_problems, completions):

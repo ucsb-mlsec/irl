@@ -46,15 +46,12 @@ def write_jsonl_file(file_path, data):
             f.write(json.dumps(line, ensure_ascii=False) + '\n')
 
 def get_rm_score(question, answer):
-    system_prompt = open("system_prompt.md").read()
     content = question + "\n\nPresent the answer in LaTex format: \\boxed{Your answer}"
     msg = [
-        {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
         {"role": "assistant", "content": answer},
     ]
     msg_context = [
-        {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
     ]
     # Format and tokenize the conversations
@@ -72,7 +69,7 @@ def get_rm_score(question, answer):
     response_score = score[0, start_index:].mean().item()
     return response_score
 
-def generate_sample_batch(question_list, temperature=0.0, n=1):
+def generate_sample_batch(question_list, raw_question_list, temperature=0.0, n=1):
     llm = LLM(
         model=args.model,
         trust_remote_code=True,
@@ -93,7 +90,7 @@ def generate_sample_batch(question_list, temperature=0.0, n=1):
             all_completions.append(question_completions)
         
         tts_completions = []
-        for i, question in enumerate(question_list):
+        for i, question in enumerate(raw_question_list):
             group = {}
             # best_of_n_max_score = -1
             # best_of_n = None
@@ -230,13 +227,15 @@ def make_conv_hf(question, tokenizer):
 def run(args, max=-1):
     all_problems = read_jsonl_file(os.path.join(args.data_dir, "aimo-validation-aime.jsonl"))
     # only keep problems in 2024
-    for problem_data in all_problems:
+    for problem_data in all_problems[:]:
         url = problem_data["url"]
         if "2024_AIME_I_Problems" in url or "2024_AIME_II_Problems" in url:
             continue
         else:
             all_problems.remove(problem_data)
     print("reading problems done!")
+    print(f"total problems: {len(all_problems)}")
+    
     if args.test_time_scaling:
         # load reward model
         global rm
@@ -251,7 +250,8 @@ def run(args, max=-1):
         rm_tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-4B-Base') # hardcoded for now
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    completions = generate_sample_batch([make_conv_hf(problem_data["question"], tokenizer) for problem_data in all_problems], args.temperature, args.n)
+    completions = generate_sample_batch([make_conv_hf(problem_data["question"], tokenizer) for problem_data in all_problems], \
+        [problem_data["question"] for problem_data in all_problems], args.temperature, args.n)
 
     tmp_data = []
     for problem_data, model_output in zip(all_problems, completions):
