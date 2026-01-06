@@ -247,8 +247,8 @@ def run(args, max=-1):
     all_problems = pd.read_json(os.path.join(args.data_dir, "math_test_cleaned.json")).to_dict(orient="records")
     print("reading problems done!")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    completions = generate_sample_batch([make_conv_hf(problem_data["question"], tokenizer) for problem_data in all_problems], \
-        [problem_data["question"] for problem_data in all_problems], args.temperature, args.n)
+    completions = generate_sample_batch([make_conv_hf(problem_data["problem"], tokenizer) for problem_data in all_problems], \
+        [problem_data["problem"] for problem_data in all_problems], args.temperature, args.n)
 
     tmp_data = []
     for problem_data, model_output in zip(all_problems, completions):
