@@ -105,7 +105,7 @@ def generate_sample_batch(question_list, raw_question_list, temperature=0.0, n=1
             self_consistent_max_score = float("-inf")
             self_consistent = None
             for _, scores in group.items():
-                cur_score = np.max([score for score, _ in scores])
+                cur_score = np.sum(np.exp([score for score, _ in scores]))
                 if cur_score > self_consistent_max_score:
                     self_consistent_max_score = cur_score
                     single_max_score = float("-inf")
@@ -404,7 +404,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="")
     # test time scaling options
     parser.add_argument("--test_time_scaling", type=bool, default=False)
-    parser.add_argument("--reward_model", type=str, default="/scr/xian/IRL_Qwen3_4B_Base/global_step_75/reward_model")
+    parser.add_argument("--reward_model", type=str, default="/scr/xian/IRL_Qwen3_4B_Base_PRM_0.1/reward_model")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--n", type=int, default=1)
     args = parser.parse_args()
