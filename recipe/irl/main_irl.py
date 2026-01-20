@@ -33,6 +33,20 @@ from .irl_ray_trainer import RayIRLTrainer
 import os
 import ray
 import hydra
+import re
+
+
+def format_reward(predict_str: str) -> float:
+    pattern = re.compile(r".*\\boxed\{.*\}.*", re.DOTALL)
+    match_result = re.fullmatch(pattern, predict_str)
+    if len(predict_str) < 20:
+        return -1.0
+    return 0.0 if match_result else -1.0
+
+def compute_format_score(data_source, solution_str, ground_truth, extra_info=None):
+    return format_reward(solution_str)
+
+
 
 # TODO: What is the parallel method we should use
 @hydra.main(config_path='config', config_name='irl_trainer', version_base=None)
@@ -117,6 +131,8 @@ def main_task(config, compute_score=None):
     if reward_manager_name == 'naive':
         from verl.workers.reward_manager import NaiveRewardManager
         reward_manager_cls = NaiveRewardManager
+        from verl.workers.reward_manager import PrimeRewardManager
+        val_reward_manager_cls = PrimeRewardManager
     elif reward_manager_name == 'irl':
         from verl.workers.reward_manager import IRLRewardManager
         reward_manager_cls = IRLRewardManager
@@ -124,8 +140,12 @@ def main_task(config, compute_score=None):
         val_reward_manager_cls = PrimeRewardManager
     else:
         raise NotImplementedError
-    
-    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
+    # define reward function
+    if reward_manager_name == 'naive':
+       reward_compute_score = compute_format_score
+    else:
+       reward_compute_score = compute_score
+    reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=reward_compute_score)
 
     val_reward_fn = val_reward_manager_cls(tokenizer=tokenizer, num_examine=1, compute_score=compute_score)
 
