@@ -138,13 +138,15 @@ def setup(args):
     results.append(
         {
             "acc": sum([result["acc"] for result in results]) / len(results),
+            "pass@1": sum([result["pass@1"] for result in results]) / len(results),
         }
     )
 
     # print all results
     pad = max([len(data_name) for data_name in data_list])
     print("\t".join(data_name.ljust(pad, " ") for data_name in data_list))
-    print("\t".join([f"{result['acc']:.1f}".ljust(pad, " ") for result in results]))
+    print("acc:\t" + "\t".join([f"{result['acc']:.1f}".ljust(pad, " ") for result in results]))
+    print("pass@1:\t" + "\t".join([f"{result['pass@1']:.1f}".ljust(pad, " ") for result in results]))
 
 
 def is_multi_choice(answer):

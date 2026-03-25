@@ -11,6 +11,21 @@ from utils import load_jsonl
 from python_executor import PythonExecutor
 
 
+def _pass_at_k(n, c, k):
+    """
+    Unbiased estimator for pass@k (Chen et al., "Evaluating Large Language
+    Models Trained on Code", 2021).
+
+    :param n: total number of generated samples per problem
+    :param c: number of correct samples for this problem
+    :param k: k in pass@k
+    :return: estimated pass@k for one problem
+    """
+    if n - c < k:
+        return 1.0
+    return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
+
+
 def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, max_num_samples=None, execute=False):
     assert samples or file_path, "samples or file_path must be provided"
     if not samples:
@@ -67,15 +82,25 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
             score_mat[i] = s + [s[-1]] * (max_len - len(s)) # pad
 
     # output mean of each column of scores
-    col_means= np.array(score_mat).mean(axis=0)
+    score_array = np.array(score_mat)
+    col_means = score_array.mean(axis=0)
     mean_score = list(np.round(col_means * 100, decimals=1))
+
+    # compute pass@k using the unbiased estimator
+    n_samples = score_array.shape[1]  # n_sampling per problem
+    correct_counts = score_array.sum(axis=1).astype(int)
+    pass_at_1 = float(np.round(
+        np.mean([_pass_at_k(n_samples, c, 1) for c in correct_counts]) * 100,
+        decimals=1,
+    ))
 
     result_json = {
         "num_samples": len(samples),
         "num_scores": len(scores),
         "timeout_samples": timeout_cnt,
         "empty_samples": len([s for s in samples if not s['pred'][-1]]),
-        "acc": mean_score[0]
+        "acc": mean_score[0],
+        "pass@1": pass_at_1,
     }
 
     # each type score
