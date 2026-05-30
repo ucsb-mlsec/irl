@@ -1,6 +1,5 @@
 set -x
 
-export WANDB_API_KEY='c2fef355c334fecafdb3d2d32f0e8c07b8349538'
 claude_train_path=$HOME/irl/data/prime_train.parquet
 claude_test_path=$HOME/irl/data/validation.parquet
 

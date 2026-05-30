@@ -46,8 +46,15 @@ Place the files under `data/` and update the paths at the top of `recipe/irl/run
 
 ## Training
 
+Set your Weights & Biases API key (the launch scripts no longer ship one):
+
 ```bash
-wandb login
+export WANDB_API_KEY=<your_key>   # or run: wandb login
+```
+
+Then launch training:
+
+```bash
 bash recipe/irl/run_irl_qwen.sh
 ```
 
